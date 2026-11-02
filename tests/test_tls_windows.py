@@ -435,7 +435,7 @@ class SchannelTests(unittest.TestCase):
         crl_file.write_bytes(crl.public_bytes(serialization.Encoding.PEM))
         config = directory / 'receiver.conf'
         config.write_text('\n'.join([
-            'foreground = yes', 'debug = debug', 'output = ' + str(log),
+            'debug = debug', 'output = ' + str(log),
             'sslVersionMin = TLSv1.3' if tls13 else 'sslVersionMin = TLSv1.2',
             'sslVersionMax = TLSv1.3' if tls13 else 'sslVersionMax = TLSv1.2',
             '[from-clients]', 'accept = 127.0.0.1:' + str(port),
