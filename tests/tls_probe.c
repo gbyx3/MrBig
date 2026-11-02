@@ -29,6 +29,10 @@ int main(int argc, char **argv)
     WSADATA data;
     char message[65536];
     int result;
+    int iteration, repetitions = 1, all_success = 1;
+    DWORD baseline_handles = 0, final_handles = 0;
+    const char *repeat = getenv("MRBIG_TLS_REPEAT");
+    const char *renew = getenv("MRBIG_TLS_RENEW_THUMBPRINT");
     HANDLE cancel_thread = NULL;
     if (argc != 7 || strlen(argv[3]) >= sizeof(config.client_thumbprint) ||
         strlen(argv[4]) >= sizeof(config.ca_file) ||
@@ -37,6 +41,8 @@ int main(int argc, char **argv)
     strcpy(config.client_thumbprint, argv[3]);
     strcpy(config.ca_file, argv[4]);
     strcpy(config.crl_file, argv[6]);
+    if (repeat) repetitions = atoi(repeat);
+    if (repetitions < 1 || repetitions > 100 || (renew && strlen(renew) != 40)) return 2;
     config.timeout_ms = (DWORD)strtoul(argv[5], NULL, 10);
     memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
@@ -46,12 +52,21 @@ int main(int argc, char **argv)
     if (WSAStartup(MAKEWORD(2, 2), &data)) return 2;
     if (getenv("MRBIG_TLS_CANCEL"))
         cancel_thread = CreateThread(NULL, 0, cancel_later, NULL, 0, NULL);
-    result = mr_tls_send(&address, argv[2], "127.0.0.1", &config,
-                         message, sizeof(message));
+    for (iteration = 0; iteration < repetitions; ++iteration) {
+        if (iteration && renew) strcpy(config.client_thumbprint, renew);
+        result = mr_tls_send(&address, argv[2], "127.0.0.1", &config,
+                             message, sizeof(message));
+        if (!result) all_success = 0;
+        if (!iteration && !GetProcessHandleCount(GetCurrentProcess(), &baseline_handles)) return 2;
+    }
+    if (!GetProcessHandleCount(GetCurrentProcess(), &final_handles)) return 2;
     WSACleanup();
     if (cancel_thread) {
         WaitForSingleObject(cancel_thread, INFINITE);
         CloseHandle(cancel_thread);
     }
-    return result ? 0 : 1;
+    printf("handles after warmup=%lu final=%lu iterations=%d\n",
+            (unsigned long)baseline_handles, (unsigned long)final_handles, repetitions);
+    if (repetitions > 1 && final_handles > baseline_handles + 8) return 3;
+    return all_success ? 0 : 1;
 }

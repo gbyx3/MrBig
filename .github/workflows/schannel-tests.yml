@@ -34,6 +34,13 @@ jobs:
           name: unsigned-tls-development-probes
           path: tests/tls_probe*.exe
           if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: unsigned-tls-development-clients
+          path: |
+            X86/mrbig.exe
+            X64/mrbig64.exe
+          if-no-files-found: error
 
   windows-integration:
     needs: build
@@ -51,11 +58,20 @@ jobs:
         with:
           name: unsigned-tls-development-probes
           path: probes
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: unsigned-tls-development-clients
+          path: clients
       - name: Install test-only certificate tooling
         run: python -m pip install -r tests/requirements-windows.txt
       - name: Exercise Schannel using disposable local certificates
         shell: pwsh
         run: |
           $env:MRBIG_TLS_PROBE = (Resolve-Path "probes/tls_probe${{ matrix.bits }}.exe").Path
+          if ('${{ matrix.bits }}' -eq '32') {
+            $env:MRBIG_CLIENT = (Resolve-Path 'clients/X86/mrbig.exe').Path
+          } else {
+            $env:MRBIG_CLIENT = (Resolve-Path 'clients/X64/mrbig64.exe').Path
+          }
           python -m unittest discover -s tests -p test_tls_windows.py -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

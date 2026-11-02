@@ -6,6 +6,19 @@
 
 SERVICE_STATUS          ServiceStatus; 
 SERVICE_STATUS_HANDLE   ServiceStatusHandle; 
+static HANDLE stop_event;
+
+int mr_service_stopping(void)
+{
+    return stop_event && WaitForSingleObject(stop_event, 0) == WAIT_OBJECT_0;
+}
+
+int mr_service_wait(DWORD milliseconds)
+{
+    if (stop_event) return WaitForSingleObject(stop_event, milliseconds) == WAIT_OBJECT_0;
+    Sleep(milliseconds);
+    return 0;
+}
 
 VOID  WINAPI ServiceCtrlHandler (DWORD opcode); 
 VOID  WINAPI ServiceStart (DWORD argc, LPTSTR *argv); 
@@ -105,14 +118,19 @@ int install_service(char *service_name, char *display_name)
 	    NULL,                    // ServicesActive database 
 	    SC_MANAGER_ALL_ACCESS);  // full access rights 
  
-	if (NULL == schSCManager) 
-	    printf("OpenSCManager failed (%d)\n", (int)GetLastError());
+	if (NULL == schSCManager) {
+		printf("OpenSCManager failed (%d)\n", (int)GetLastError());
+		return 1;
+	}
 
 	if (CreateSampleService(schSCManager, service_name, display_name)) {
 		printf("Success\n");
 	} else {
 		printf("Failure\n");
+		CloseServiceHandle(schSCManager);
+		return 1;
 	}
+	CloseServiceHandle(schSCManager);
 	return 0;
 }
 
@@ -145,10 +163,11 @@ void WINAPI ServiceStart (DWORD argc, LPTSTR *argv)
     DWORD specificError; 
  
     startup_log("ServiceStart()");
-    ServiceStatus.dwServiceType        = SERVICE_WIN32; 
+    stop_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!stop_event) return;
+    ServiceStatus.dwServiceType        = SERVICE_WIN32_OWN_PROCESS;
     ServiceStatus.dwCurrentState       = SERVICE_START_PENDING; 
-    ServiceStatus.dwControlsAccepted   =
-		SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PAUSE_CONTINUE; 
+    ServiceStatus.dwControlsAccepted   = 0;
     ServiceStatus.dwWin32ExitCode      = 0; 
     ServiceStatus.dwServiceSpecificExitCode = 0; 
     ServiceStatus.dwCheckPoint         = 0; 
@@ -165,6 +184,8 @@ void WINAPI ServiceStart (DWORD argc, LPTSTR *argv)
     if (ServiceStatusHandle == (SERVICE_STATUS_HANDLE)0) 
     { 
         startup_log(" [MY_SERVICE] RegisterServiceCtrlHandler failed %d\n", GetLastError()); 
+        CloseHandle(stop_event);
+        stop_event = NULL;
         return; 
     } 
  
@@ -181,11 +202,14 @@ void WINAPI ServiceStart (DWORD argc, LPTSTR *argv)
         ServiceStatus.dwServiceSpecificExitCode = specificError; 
  
         SetServiceStatus (ServiceStatusHandle, &ServiceStatus); 
+        CloseHandle(stop_event);
+        stop_event = NULL;
         return; 
     } 
  
     // Initialization complete - report running status. 
     ServiceStatus.dwCurrentState       = SERVICE_RUNNING; 
+    ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PAUSE_CONTINUE;
     ServiceStatus.dwCheckPoint         = 0; 
     ServiceStatus.dwWaitHint           = 0; 
  
@@ -198,6 +222,16 @@ void WINAPI ServiceStart (DWORD argc, LPTSTR *argv)
     // This is where the service does its work. 
     startup_log(" [MY_SERVICE] Returning the Main Thread \n",0); 
     mrbig();
+
+    /* Report STOPPED only after reporting/collectors have actually returned. */
+    stop_winsock();
+    ServiceStatus.dwControlsAccepted = 0;
+    ServiceStatus.dwCurrentState = SERVICE_STOPPED;
+    ServiceStatus.dwCheckPoint = 0;
+    ServiceStatus.dwWaitHint = 0;
+    SetServiceStatus(ServiceStatusHandle, &ServiceStatus);
+    CloseHandle(stop_event);
+    stop_event = NULL;
  
     return; 
 } 
@@ -232,13 +266,13 @@ VOID WINAPI ServiceCtrlHandler (DWORD Opcode)
          break; 
  
        case SERVICE_CONTROL_STOP:
-       // Do whatever it takes to stop here.
 	 mr_tls_cancel();
-	 stop_winsock();
+         if (stop_event) SetEvent(stop_event);
          ServiceStatus.dwWin32ExitCode = 0; 
-         ServiceStatus.dwCurrentState  = SERVICE_STOPPED; 
-         ServiceStatus.dwCheckPoint    = 0; 
-         ServiceStatus.dwWaitHint      = 0; 
+         ServiceStatus.dwCurrentState  = SERVICE_STOP_PENDING;
+         ServiceStatus.dwControlsAccepted = 0;
+         ServiceStatus.dwCheckPoint    = 1;
+         ServiceStatus.dwWaitHint      = 30000;
 
          if (!SetServiceStatus (ServiceStatusHandle, 
            &ServiceStatus))

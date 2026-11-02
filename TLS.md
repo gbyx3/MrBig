@@ -40,6 +40,10 @@ tls_crl_file C:\ProgramData\MrBig\transport-issuer.crl
 - Existing `display` destinations retain their existing plaintext behavior.
   A TLS failure **never** falls back to those destinations automatically; if
   plaintext and TLS entries coexist, each is an independently configured target.
+- `option no_clientlog` disables the raw client inventory report while retaining
+  the standalone CPU/memory/disk/process/service checks. Recommended for a
+  minimal identity-server pilot: no raw process command lines, registry/event-log
+  inventory or other clientlog sections are gathered by that report path.
 
 The prototype uses modern Schannel credentials (Windows10/Server2019 or newer),
 negotiating TLS1.2 or TLS1.3 where the OS enables it. SSL2/3 and TLS1.0/1.1 are
@@ -106,6 +110,12 @@ that does **not** constitute passing Schannel runtime validation.
   No production CA or server has been changed by this development work.
 - Complete native CNG key ACL-denial, same-process renewal, resource-leak,
   aggregate-delay and full service-lifecycle acceptance tests.
+  The pilot-readiness increment adds key ACL denial/restoration on disposable
+  keys, same-process identity selection/peer verification, bounded handle counts
+  after30successful/failed connections, and actual disposable Windows services
+  (start/stop/restart and stop during a stalled TLS handshake). These additions
+  require their own passing CI. Handle-count tests are not exhaustive heap-leak
+  or long-duration soak tests; config-driven renewal still needs pilot evidence.
 - Validate configuration/trust-file ownership, parent-directory protections and
   administrator-only writes in deployment; the client does not yet enforce ACLs.
   Unknown, empty or truncated TLS configuration now disables TLS rather than

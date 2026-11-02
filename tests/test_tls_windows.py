@@ -7,6 +7,7 @@ No live infrastructure, administrator keys, or system-root trust changes.
 import datetime
 import json
 import os
+import shutil
 from pathlib import Path
 import socket
 import ssl
@@ -33,6 +34,7 @@ class SchannelTests(unittest.TestCase):
         cls.root = Path(cls.temp.name)
         cls.probe = os.environ["MRBIG_TLS_PROBE"]
         cls.thumbprints = []
+        cls.cng_keys = {}
         now = datetime.datetime.now(datetime.timezone.utc)
 
         def issue(name, issuer=None, issuer_key=None, ca=False, expired=False, client=False):
@@ -145,6 +147,7 @@ class SchannelTests(unittest.TestCase):
         path.write_bytes(cert.public_bytes(serialization.Encoding.DER))
         thumbprint = cert.fingerprint(hashes.SHA1()).hex().upper()
         cls.thumbprints.append(thumbprint)
+        cls.cng_keys[thumbprint] = key_name
         subprocess.run(["pwsh.exe", "-NoProfile", "-NonInteractive", "-Command",
             "$ErrorActionPreference='Stop';"
             "$key=[Security.Cryptography.CngKey]::Open('" + key_name + "',"
@@ -188,7 +191,8 @@ class SchannelTests(unittest.TestCase):
 
     def exchange(self, certificate="proxy.example", name="proxy.example",
                  root="test-root", thumbprint=None, stall=False, crl="valid", cancel=False,
-                 tls13=False, reject_client=False, fragment=False, abrupt=False):
+                 tls13=False, reject_client=False, fragment=False, abrupt=False,
+                 repeat=1, renew=None, deny_key=False):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = context.maximum_version = (ssl.TLSVersion.TLSv1_3 if tls13 else ssl.TLSVersion.TLSv1_2)
         context.load_cert_chain(self.root / (certificate + ".pem"), self.root / (certificate + ".key"))
@@ -201,78 +205,98 @@ class SchannelTests(unittest.TestCase):
         port = listener.getsockname()[1]
         received = bytearray()
         failures = []
+        peers = []
 
-        def serve():
+        def serve_one():
             try:
-                with listener:
-                    connection, _ = listener.accept()
-                    with connection:
-                        connection.settimeout(3)
-                        if abrupt:
-                            return
-                        if stall:
-                            while connection.recv(4096):
-                                pass
-                            return
-                        if fragment:
-                            incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
-                            stream = context.wrap_bio(incoming, outgoing, server_side=True)
+                connection, _ = listener.accept()
+                with connection:
+                    connection.settimeout(3)
+                    if abrupt:
+                        return
+                    if stall:
+                        while connection.recv(4096):
+                            pass
+                        return
+                    if fragment:
+                        incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+                        stream = context.wrap_bio(incoming, outgoing, server_side=True)
 
-                            def flush():
-                                while outgoing.pending:
-                                    data = outgoing.read()
-                                    for offset in range(0, len(data), 7):
-                                        connection.sendall(data[offset:offset + 7])
-                                        time.sleep(0.001)
+                        def flush():
+                            while outgoing.pending:
+                                data = outgoing.read()
+                                for offset in range(0, len(data), 7):
+                                    connection.sendall(data[offset:offset + 7])
+                                    time.sleep(0.001)
 
-                            while True:
-                                try:
-                                    stream.do_handshake()
-                                    flush()
-                                    break
-                                except ssl.SSLWantReadError:
-                                    flush()
-                                    data = connection.recv(4096)
-                                    if not data:
-                                        raise ConnectionError("Peer closed during handshake")
+                        while True:
+                            try:
+                                stream.do_handshake()
+                                flush()
+                                break
+                            except ssl.SSLWantReadError:
+                                flush()
+                                data = connection.recv(4096)
+                                if not data:
+                                    raise ConnectionError("Peer closed during handshake")
+                                incoming.write(data)
+                        while True:
+                            try:
+                                data = stream.read(4096)
+                                if not data:
+                                    return
+                                received.extend(data)
+                            except ssl.SSLWantReadError:
+                                flush()
+                                data = connection.recv(4096)
+                                if not data:
+                                    incoming.write_eof()
+                                else:
                                     incoming.write(data)
-                            while True:
-                                try:
-                                    data = stream.read(4096)
-                                    if not data:
-                                        return
-                                    received.extend(data)
-                                except ssl.SSLWantReadError:
-                                    flush()
-                                    data = connection.recv(4096)
-                                    if not data:
-                                        incoming.write_eof()
-                                    else:
-                                        incoming.write(data)
-                            return
-                        with context.wrap_socket(connection, server_side=True,
-                                                 suppress_ragged_eofs=False) as stream:
-                            while True:
-                                chunk = stream.recv(4096)
-                                if not chunk:
-                                    break
-                                received.extend(chunk)
+                    with context.wrap_socket(connection, server_side=True,
+                                             suppress_ragged_eofs=False) as stream:
+                        peers.append(x509.load_der_x509_certificate(stream.getpeercert(binary_form=True))
+                                     .fingerprint(hashes.SHA1()).hex().upper())
+                        while True:
+                            chunk = stream.recv(4096)
+                            if not chunk:
+                                break
+                            received.extend(chunk)
             except (ssl.SSLError, ConnectionError, TimeoutError, OSError) as error:
                 failures.append(getattr(error, "reason", type(error).__name__))
+
+        def serve():
+            with listener:
+                for _ in range(repeat):
+                    serve_one()
 
         thread = threading.Thread(target=serve, daemon=True)
         thread.start()
         started = time.monotonic()
         environment = dict(os.environ)
+        environment["MRBIG_TLS_REPEAT"] = str(repeat)
+        if renew:
+            environment["MRBIG_TLS_RENEW_THUMBPRINT"] = renew
         if cancel:
             environment["MRBIG_TLS_CANCEL"] = "1"
-        result = subprocess.run([self.probe, str(port), name,
-            self.thumbprint if thumbprint is None else thumbprint,
+        arguments = [str(port), name, self.thumbprint if thumbprint is None else thumbprint,
             str(self.root / (root + ".pem")), "750" if stall and not cancel else "10000",
-            str(self.root / (crl + ".crl")) if crl is not None else ""], timeout=15, env=environment)
+            str(self.root / (crl + ".crl")) if crl is not None else ""]
+        if deny_key:
+            command = ["pwsh.exe", "-NoProfile", "-NonInteractive", "-File",
+                str(Path(__file__).with_name("with_denied_key.ps1")),
+                "-KeyName", self.cng_keys[thumbprint], "-Probe", self.probe]
+            stdin = json.dumps(arguments) + "\n"
+        else:
+            command, stdin = [self.probe, *arguments], None
+        result = subprocess.run(command, input=stdin, timeout=60 if repeat > 1 else 15,
+                                env=environment, capture_output=True, text=True)
+        self.last_probe_stdout = result.stdout
+        self.last_probe_stderr = result.stderr
         elapsed = time.monotonic() - started
         thread.join(5)
         self.assertFalse(thread.is_alive(), "TLS test server did not terminate")
+        self.last_peers = peers
         return result.returncode, received, elapsed, failures
 
     def test_mutual_tls_large_report_and_clean_shutdown(self):
@@ -323,6 +347,147 @@ class SchannelTests(unittest.TestCase):
             code, received, _, _ = self.exchange(thumbprint=thumbprint)
             self.assertEqual(code, 0)
             self.assertEqual(len(received), 65536)
+
+    def test_rotation_in_same_process(self):
+        code, received, _, failures = self.exchange(thumbprint=self.cng_thumbprint,
+            repeat=2, renew=self.renewed_thumbprint)
+        self.assertEqual(code, 0, self.last_probe_stderr)
+        self.assertEqual(len(received), 2 * 65536)
+        self.assertEqual(self.last_peers, [self.cng_thumbprint, self.renewed_thumbprint])
+        self.assertFalse(failures)
+
+    def test_repeated_success_has_bounded_handles(self):
+        code, received, _, failures = self.exchange(thumbprint=self.cng_thumbprint, repeat=30)
+        self.assertEqual(code, 0, self.last_probe_stdout + self.last_probe_stderr)
+        self.assertEqual(len(received), 30 * 65536)
+        self.assertEqual(len(self.last_peers), 30)
+        self.assertFalse(failures)
+
+    def test_repeated_failure_has_bounded_handles(self):
+        code, received, _, _ = self.exchange(name="wrong.example", repeat=30)
+        self.assertEqual(code, 1, self.last_probe_stdout + self.last_probe_stderr)
+        self.assertEqual(len(self.last_peers), 30)
+        self.assertFalse(received)
+
+    def test_machine_key_access_denied(self):
+        code, received, _, _ = self.exchange(thumbprint=self.cng_thumbprint, deny_key=True)
+        self.assertEqual(code, 1, self.last_probe_stderr)
+        self.assertIn("stage=private-key-access", self.last_probe_stderr)
+        self.assertFalse(received)
+
+    def exercise_service(self, stall=False):
+        """Install only a uniquely named disposable service on the hosted CI VM."""
+        service = "MrBigTlsTest" + os.urandom(6).hex()
+        directory = self.root / (service + " with spaces")
+        directory.mkdir()
+        binary = directory / "mrbig.exe"
+        shutil.copy2(os.environ["MRBIG_CLIENT"], binary)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(self.root / "proxy.example.pem", self.root / "proxy.example.key")
+        context.load_verify_locations(self.root / "test-root.pem")
+        context.verify_mode = ssl.CERT_REQUIRED
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(16)
+        listener.settimeout(0.2)
+        port = listener.getsockname()[1]
+        finished = threading.Event()
+        connected = threading.Event()
+        report = threading.Event()
+        count = [0]
+        config = ["[mrbig]", "machine pilot.example", "sleep 300", "loop 300",
+            f"tls_display 127.0.0.1:{port} proxy.example",
+            f"tls_client_thumbprint {self.cng_thumbprint}",
+            f"tls_ca_file {self.root / 'test-root.pem'}",
+            f"tls_crl_file {self.root / 'valid.crl'}",
+            "option no_clientlog", "option no_cpu", "option no_memory", "option no_disk",
+            "option no_procs", "option no_svcs", "option no_wmi", "option no_ext"]
+        (directory / "mrbig.cfg").write_text("\n".join(config) + "\n")
+
+        def serve():
+            with listener:
+                while not finished.is_set():
+                    try:
+                        connection, _ = listener.accept()
+                    except TimeoutError:
+                        continue
+                    except OSError:
+                        return
+                    with connection:
+                        connected.set()
+                        connection.settimeout(0.2 if stall else 3)
+                        try:
+                            if stall:
+                                while not finished.is_set():
+                                    try:
+                                        if not connection.recv(4096):
+                                            break
+                                    except TimeoutError:
+                                        continue
+                                continue
+                            with context.wrap_socket(connection, server_side=True) as stream:
+                                header = bytearray()
+                                while True:
+                                    chunk = stream.recv(4096)
+                                    if not chunk:
+                                        break
+                                    if len(header) < 256:
+                                        header.extend(chunk[:256 - len(header)])
+                                if header.startswith((b"status ", b"status+")):
+                                    count[0] += 1
+                                    report.set()
+                        except (ssl.SSLError, OSError):
+                            pass
+
+        def powershell(script):
+            result = subprocess.run(["pwsh.exe", "-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference='Stop';" + script], capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        installed = False
+        try:
+            subprocess.run([str(binary), "-i" + service], check=True, timeout=10)
+            installed = True
+            for _ in range(1 if stall else 2):
+                report.clear()
+                connected.clear()
+                metadata = json.loads(powershell(
+                    "Start-Service -Name '" + service + "';"
+                    "$s=Get-CimInstance Win32_Service -Filter \"Name='" + service + "'\";"
+                    "@{processId=$s.ProcessId;path=$s.PathName}|ConvertTo-Json -Compress"))
+                self.assertEqual(metadata["path"], '"' + str(binary) + '"')
+                self.assertGreater(metadata["processId"], 0)
+                self.assertTrue((connected if stall else report).wait(10),
+                                "Service did not establish the expected reporting connection")
+                started = time.monotonic()
+                powershell("Stop-Service -Name '" + service + "';"
+                    "$s=Get-Service -Name '" + service + "';"
+                    "$s.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(8));"
+                    "Wait-Process -Id " + str(metadata["processId"]) + " -Timeout 5 -ErrorAction SilentlyContinue;"
+                    "if(Get-Process -Id " + str(metadata["processId"]) +
+                    " -ErrorAction SilentlyContinue){throw 'Agent process survived STOPPED'}")
+                self.assertLess(time.monotonic() - started, 8)
+            if not stall:
+                self.assertGreaterEqual(count[0], 2)
+        finally:
+            if installed:
+                subprocess.run(["pwsh.exe", "-NoProfile", "-NonInteractive", "-Command",
+                    "Stop-Service -Name '" + service + "' -ErrorAction SilentlyContinue"], timeout=15)
+                subprocess.run(["sc.exe", "delete", service], check=True, timeout=10)
+            finished.set()
+            listener.close()
+            thread.join(5)
+            self.assertFalse(thread.is_alive(), "Disposable service listener did not exit")
+
+    def test_service_start_stop_restart(self):
+        self.exercise_service()
+
+    def test_service_stop_during_stalled_tls(self):
+        self.exercise_service(stall=True)
 
     def test_tls13(self):
         code, received, _, failures = self.exchange(tls13=True)

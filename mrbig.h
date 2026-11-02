@@ -88,6 +88,8 @@ extern void procs(void);
 extern void svcs(void);
 extern void wmi(void);
 extern int service_main(int argc, char **argv);
+extern int mr_service_stopping(void);
+extern int mr_service_wait(DWORD milliseconds);
 extern void mrbig(void);
 //extern void SvcDebugOut(LPSTR, DWORD);
 extern void ext_tests(int is_filter_enabled);

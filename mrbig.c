@@ -1109,10 +1109,11 @@ void mrbig(void)
 		mrlog("mrbig()");
 	}
 	/* Never dump the service environment: it can contain credentials/tokens. */
-	for (;;) {
+	while (!mr_service_stopping()) {
 		if (debug) mrlog("main loop");
 		read_cfg("mrbig", cfgfile);
 		readcfg();
+		if (mr_service_stopping()) break;
 		t = time(NULL);
 		strlcpy(now, ctime(&t), sizeof now);
 		p = strchr(now, '\n');
@@ -1124,22 +1125,28 @@ void mrbig(void)
 			snprcat(now, sizeof now, " [%s]", hostname);
 		}
 
-		clientlog(mrmachine, &mrsend_clientlog,
-			  debug ? &mrlog : (void (*)(char *,...))NULL,
-			  get_cfg_cache_path());
+		if (!get_option("no_clientlog", 0))
+			clientlog(mrmachine, &mrsend_clientlog,
+				  debug ? &mrlog : (void (*)(char *,...))NULL,
+				  get_cfg_cache_path());
         check_chunks("after clientlog test");
+		if (mr_service_stopping()) break;
 
 		cpu();
 		check_chunks("after cpu test");
+		if (mr_service_stopping()) break;
 
 		disk();
 		check_chunks("after disk test");
+		if (mr_service_stopping()) break;
 
 		memory();
 		check_chunks("after memory test");
+		if (mr_service_stopping()) break;
 
 		msgs();
 		check_chunks("after msgs test");
+		if (mr_service_stopping()) break;
 
 		if (get_option("ntp", 0)) {
 			ntp_skew();
@@ -1150,9 +1157,11 @@ void mrbig(void)
 
 		procs();
 		check_chunks("after procs test");
+		if (mr_service_stopping()) break;
 
 		svcs();
 		check_chunks("after svcs test");
+		if (mr_service_stopping()) break;
 
 		wmi();
 		check_chunks("after wmi test");
@@ -1176,8 +1185,9 @@ void mrbig(void)
 			dump_chunks();
 			check_chunks("after main loop");
 		}
-		Sleep(sleeptime*1000);
+		if (mr_service_wait((DWORD)sleeptime * 1000)) break;
 	}
+	clear_cfg();
 }
 
 void usage(void)
@@ -1225,11 +1235,10 @@ int main(int argc, char **argv)
 			debug_memory = 1;
 		} else if (!strncmp(argv[i], "-i", 2)) {
 			if (argv[i][2] == '\0') {
-				install_service("MrBig", "Mr Big Monitoring Agent");
+				return install_service("MrBig", "Mr Big Monitoring Agent");
 			} else {
-				install_service(argv[i]+2, argv[i]+2);
+				return install_service(argv[i]+2, argv[i]+2);
 			}
-			return 0;
 		} else if (!strncmp(argv[i], "-u", 2)) {
 			if (argv[i][2] == '\0') {
 				delete_service("MrBig");

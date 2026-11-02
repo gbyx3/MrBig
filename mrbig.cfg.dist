@@ -31,6 +31,8 @@ display 10.0.4.5
 #tls_client_thumbprint 0123456789ABCDEF0123456789ABCDEF01234567
 #tls_ca_file C:\ProgramData\MrBig\transport-root.pem
 #tls_crl_file C:\ProgramData\MrBig\transport-issuer.crl
+# For a minimal identity-server pilot, omit raw client inventory:
+#option no_clientlog
 
 # How often the client runs the main loop (default: 300 seconds)
 #sleep 300

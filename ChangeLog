@@ -1,3 +1,11 @@
+2026-11-02 Prepare isolated pilot-readiness checks
+    Correct service stop signaling: report STOPPED only after the reporting
+    loop exits, interrupt sleeping/TLS waits, and propagate service-install
+    failures. Add optional no_clientlog health-only reporting. Add native key
+    ACL-denial/restoration, repeated connection/handle, same-process certificate
+    selection and disposable Windows service lifecycle tests. Runtime acceptance
+    pending; this is not production installation approval.
+
 2026-11-02 Harden development builds
     Enable strong stack protection, static compiler support, ASLR/NX and
     high-entropy ASLR on x64. Zero PE linker timestamps and verify native
