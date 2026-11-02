@@ -228,6 +228,7 @@ static int verify_server(struct tls_connection *c, const char *name,
     if (!CertGetCertificateChain(engine ? engine : HCCE_LOCAL_MACHINE, peer,
             NULL, collection, &parameters,
             CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL | CERT_CHAIN_DISABLE_AIA |
+            CERT_CHAIN_DISABLE_AUTH_ROOT_AUTO_UPDATE |
             CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT |
             CERT_CHAIN_REVOCATION_CHECK_CACHE_ONLY, NULL, &chain)) goto cleanup;
     /* A supplied stale/corrupt/revoking CRL must not be masked by cached evidence. */
@@ -342,12 +343,15 @@ static int send_records(struct tls_connection *c, const char *message, size_t le
     SecPkgContext_StreamSizes sizes;
     BYTE *record;
     size_t capacity;
-    if (QueryContextAttributes(&c->context, SECPKG_ATTR_STREAM_SIZES,
-                               &sizes) != SEC_E_OK || !sizes.cbMaximumMessage)
+    SECURITY_STATUS status = QueryContextAttributes(&c->context, SECPKG_ATTR_STREAM_SIZES,
+                                                    &sizes);
+    if (status != SEC_E_OK || !sizes.cbMaximumMessage) {
+        c->error = status != SEC_E_OK ? (DWORD)status : ERROR_INVALID_DATA;
         return 0;
+    }
     capacity = (size_t)sizes.cbHeader + sizes.cbMaximumMessage + sizes.cbTrailer;
     record = malloc(capacity);
-    if (!record) return 0;
+    if (!record) { c->error = ERROR_NOT_ENOUGH_MEMORY; return 0; }
     while (length) {
         SecBuffer buffers[4];
         SecBufferDesc desc;
@@ -471,7 +475,8 @@ int mr_tls_send(const struct sockaddr_in *address, const char *server_name,
     credentials.cTlsParameters = 1;
     credentials.pTlsParameters = &protocols;
     credentials.dwFlags = SCH_CRED_MANUAL_CRED_VALIDATION |
-                           SCH_CRED_NO_DEFAULT_CREDS | SCH_USE_STRONG_CRYPTO;
+                           SCH_CRED_NO_DEFAULT_CREDS | SCH_USE_STRONG_CRYPTO |
+                           SCH_CRED_CACHE_ONLY_URL_RETRIEVAL;
     c.stage = "credentials";
     security_status = AcquireCredentialsHandleA(NULL, UNISP_NAME_A, SECPKG_CRED_OUTBOUND,
             NULL, &credentials, NULL, NULL, &c.credentials, &expiry);
@@ -499,7 +504,10 @@ int mr_tls_send(const struct sockaddr_in *address, const char *server_name,
         goto cleanup;
     c.stage = "report-write";
     c.error = 0;
-    ok = send_records(&c, message, length) && close_notify(&c, server_name);
+    if (send_records(&c, message, length)) {
+        c.stage = "close-notify";
+        ok = close_notify(&c, server_name);
+    }
 cleanup:
     if (!ok) mrlog("TLS report to %s:%u (%s) failed: stage=%s code=0x%08lx; no plaintext fallback",
         inet_ntoa(address->sin_addr), (unsigned int)ntohs(address->sin_port),

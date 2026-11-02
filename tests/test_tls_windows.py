@@ -59,6 +59,8 @@ class SchannelTests(unittest.TestCase):
 
         ca, ca_key = issue("test-root", ca=True)
         issue("other-root", ca=True)
+        no_crl_ca, no_crl_key = issue("no-crl-root", ca=True)
+        issue("unverifiable.example", no_crl_ca, no_crl_key)
         server, _ = issue("proxy.example", ca, ca_key)
         issue("fresh.example", ca, ca_key)
         issue("revoked.example", ca, ca_key)
@@ -100,9 +102,10 @@ class SchannelTests(unittest.TestCase):
 
         cls.cng_thumbprint = cls.create_cng_identity("native-client")
         cls.renewed_thumbprint = cls.create_cng_identity("renewed-client")
+        cls.expired_thumbprint = cls.create_cng_identity("expired-client", expired=True)
 
     @classmethod
-    def create_cng_identity(cls, name):
+    def create_cng_identity(cls, name, expired=False):
         """Generate a persisted, non-exportable machine key; export only its CSR."""
         key_name = "MrBig-test-" + os.urandom(12).hex()
         cls.addClassCleanup(cls.remove_cng_key, key_name)
@@ -133,8 +136,8 @@ class SchannelTests(unittest.TestCase):
         now = datetime.datetime.now(datetime.timezone.utc)
         cert = (x509.CertificateBuilder().subject_name(csr.subject).issuer_name(cls.ca.subject)
                 .public_key(csr.public_key()).serial_number(x509.random_serial_number())
-                .not_valid_before(now - datetime.timedelta(days=1))
-                .not_valid_after(now + datetime.timedelta(days=2))
+                .not_valid_before(now - datetime.timedelta(days=2))
+                .not_valid_after(now + datetime.timedelta(days=-1 if expired else 2))
                 .add_extension(x509.BasicConstraints(ca=False, path_length=None), True)
                 .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]), False)
                 .sign(cls.ca_key, hashes.SHA256()))
@@ -266,7 +269,7 @@ class SchannelTests(unittest.TestCase):
         result = subprocess.run([self.probe, str(port), name,
             self.thumbprint if thumbprint is None else thumbprint,
             str(self.root / (root + ".pem")), "750" if stall and not cancel else "10000",
-            str(self.root / (crl + ".crl"))], timeout=15, env=environment)
+            str(self.root / (crl + ".crl")) if crl is not None else ""], timeout=15, env=environment)
         elapsed = time.monotonic() - started
         thread.join(5)
         self.assertFalse(thread.is_alive(), "TLS test server did not terminate")
@@ -341,6 +344,30 @@ class SchannelTests(unittest.TestCase):
         code, received, _, _ = self.exchange(crl="missing")
         self.assertEqual(code, 1)
         self.assertFalse(received)
+
+    def test_unknown_revocation_without_crl_fails_closed(self):
+        code, received, _, _ = self.exchange(certificate="unverifiable.example",
+            name="unverifiable.example", root="no-crl-root", crl=None)
+        self.assertEqual(code, 1)
+        self.assertFalse(received)
+
+    def test_expired_client_identity(self):
+        code, received, _, _ = self.exchange(thumbprint=self.expired_thumbprint)
+        self.assertEqual(code, 1)
+        self.assertFalse(received)
+
+    def test_proxy_connection_refused(self):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        listener.close()
+        started = time.monotonic()
+        result = subprocess.run([self.probe, str(port), "proxy.example", self.thumbprint,
+            str(self.root / "test-root.pem"), "5000", str(self.root / "valid.crl")],
+            timeout=8, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("stage=connect", result.stderr)
+        self.assertLess(time.monotonic() - started, 3)
 
     def test_invalid_crl_signature(self):
         code, received, _, _ = self.exchange(crl="bad-signature")

@@ -53,13 +53,20 @@ int delete_service(char *service_name)
 static BOOL CreateSampleService(SC_HANDLE schSCManager, char *service_name, char *display_name) 
 { 
     TCHAR szPath[MAX_PATH]; 
+    TCHAR command[MAX_PATH + 3];
+    DWORD path_length;
     SC_HANDLE schService;
     
-    if( !GetModuleFileName( NULL, szPath, MAX_PATH ) )
+    path_length = GetModuleFileName(NULL, szPath, MAX_PATH);
+    if (!path_length || path_length >= MAX_PATH)
     {
         printf("GetModuleFileName failed (%d)\n", (int)GetLastError()); 
         return FALSE;
     }
+
+    /* Prevent an unquoted service path from selecting a different executable. */
+    if (_sntprintf(command, sizeof(command) / sizeof(command[0]),
+                    _T("\"%s\""), szPath) < 0) return FALSE;
 
     schService = CreateService( 
         schSCManager,              // SCManager database 
@@ -69,7 +76,7 @@ static BOOL CreateSampleService(SC_HANDLE schSCManager, char *service_name, char
         SERVICE_WIN32_OWN_PROCESS, // service type 
         SERVICE_AUTO_START,      // start type 
         SERVICE_ERROR_NORMAL,      // error control type 
-        szPath,                    // path to service's binary 
+        command,                   // quoted path to service's binary
         NULL,                      // no load ordering group 
         NULL,                      // no tag identifier 
         NULL,                      // no dependencies 

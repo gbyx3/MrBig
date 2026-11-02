@@ -1,10 +1,19 @@
+2026-11-02 Harden development builds
+    Enable strong stack protection, static compiler support, ASLR/NX and
+    high-entropy ASLR on x64. Zero PE linker timestamps and verify native
+    imports/hardening in CI. Pin the TLS workflow actions to commit IDs and
+    Python/direct test dependency versions. Quote newly installed service
+    executable paths. Extend negative tests for expired clients, unknown
+    revocation evidence and refused proxy connections.
+
 2026-11-02 Harden experimental TLS reporting
     Require fail-closed offline revocation evidence, support modern Schannel
     TLS1.2/1.3, silently acquire machine keys, bound aggregate socket waits and
     observe service-stop cancellation. Add stage/status diagnostics and reject
     malformed/truncated TLS settings. Remove unconditional environment logging.
     Extend Windows tests for CRLs, non-exportable CNG keys and failure recovery;
-    expanded runtime acceptance pending. No production deployment performed.
+    All 18 expanded Windows tests passed on x86/x64 at revision2438e65.
+    No production deployment performed.
 
 2026-11-02 Experimental native Schannel TLS reporting
     Add explicit tls_display destinations, machine-store client certificate

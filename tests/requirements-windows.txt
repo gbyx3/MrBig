@@ -1,0 +1,2 @@
+# Test-only certificate generation; not linked into or required by MrBig.
+cryptography==50.0.2

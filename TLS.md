@@ -48,6 +48,13 @@ validity, serverAuth usage and hostname before sending application data. The
 client certificate is supplied explicitly; automatic anonymous retry is disabled.
 No custom encryption, OpenSSL DLLs, passwords or private-key files are involved.
 
+Main-client builds enable strong stack protection (including clientlog objects),
+ASLR and NX, with high-entropy ASLR on x64. Stack-protector/GCC support is linked
+statically to avoid introducing third-party runtime DLL deployment. PE linker
+timestamps are zeroed. `tests/check_pe_hardening.py` checks both executables;
+this is not yet a claim of byte-for-byte reproducible builds or Control Flow Guard.
+Native import checks are not a complete dependency vulnerability scan.
+
 Socket connect, handshake and all report writes share a ten-second budget across
 TLS destinations in each send_update call. Destinations currently execute
 sequentially; the existing plaintext phase is unchanged. Service-stop signaling
@@ -83,7 +90,9 @@ shutdown, wrong hostname/root/EKU, expired server certificate, missing client
 identity and a stalled handshake deadline. Hardening adds revocation evidence
 failures, non-exportable native CNG machine keys, renewed identities, fragmented
 handshakes, TLS1.3, rejected clients, peer disconnects and service cancellation.
-These expanded tests are pending Windows CI, not yet accepted.
+All 18 expanded tests passed on both architectures for revision `2438e65`:
+https://github.com/gbyx3/MrBig/actions/runs/41452474814.
+The subsequent build-hardening changes still require their own CI acceptance.
 Tests are skipped outside Windows;
 that does **not** constitute passing Schannel runtime validation.
 
@@ -103,5 +112,8 @@ that does **not** constitute passing Schannel runtime validation.
   silently changing trust or downgrading. Diagnostics identify destination,
   failure stage and numeric Windows status; service environment dumps removed.
 - Review build provenance, license/distribution requirements and code signing.
+- New TLS CI action references, Python version and direct test-package version
+  are pinned. Compiler/transitive dependency reproducibility and automated
+  vulnerability scanning still require a release policy.
 - Pilot separately after development review; no live installation is authorized
   by this feature branch alone.

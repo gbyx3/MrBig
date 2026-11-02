@@ -14,7 +14,7 @@ VER_RC=winver.rc
 VER_RES=winver.res
 
 CFLAGS=-Wall -Werror -O2 -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -g -ggdb -DPACKAGE=\"$(PACKAGE)\" -DVERSION=\"$(VERSION)\"
-DOCS=INSTALL EVENTS ChangeLog DEVELOPMENT TODO EXT LARRD logs.cmd testfile.txt TLS.md
+DOCS=INSTALL EVENTS ChangeLog DEVELOPMENT TODO EXT LARRD logs.cmd testfile.txt TLS.md SECURITY.md
 SRCS=cfg.c cpu.c disk.c memory.c msgs.c ntpskew.c procs.c svcs.c mrbig.c \
 	service.c readperf.c readlog.c ext_test.c \
 	strlcpy.c disphelper.c wmi.c tls.c tls_endpoint.c
@@ -66,6 +66,14 @@ else
 ORIG_EXE := mrbig.exe
 endif
 
+# Main-client hardening, including clientlog objects built by the sub-make.
+HARDEN_CFLAGS=-fstack-protector-strong
+override CFLAGS += $(HARDEN_CFLAGS)
+HARDEN_LDFLAGS=-fstack-protector-strong -static -static-libgcc -Wl,--dynamicbase,--nxcompat,--no-insert-timestamp
+ifeq ($(ARCH),64)
+HARDEN_LDFLAGS += -Wl,--high-entropy-va
+endif
+
 all:
 	$(MAKE) -C X86 mrbig.exe
 	$(MAKE) -C X64 mrbig64.exe
@@ -96,30 +104,30 @@ mrwmi:
 	$(MAKE) -C X64 mrwmi.exe
 
 mrwmi.exe: $(OBJS) wmi.o disphelper.o
-	$(CC) -o mrwmi.exe $(OBJS) wmi.o disphelper.o -lws2_32 -lpsapi -lole32 -loleaut32 -luuid -lcrypt32 -lwevtapi -lpdh -lwtsapi32 -lsecur32 -lncrypt
+	$(CC) $(LDFLAGS) $(HARDEN_LDFLAGS) -o mrwmi.exe $(OBJS) wmi.o disphelper.o -lws2_32 -lpsapi -lole32 -loleaut32 -luuid -lcrypt32 -lwevtapi -lpdh -lwtsapi32 -lsecur32 -lncrypt
 
 mrbig.exe: $(OBJS) clientlog.o $(VER_RES)
 	@echo "Building mrbig.exe"
-	$(CC) -o mrbig.exe $(OBJS) $(CLIENTLOGOBJS_32)  $(VER_RES) -lws2_32 -lpsapi -lole32 -loleaut32 -luuid -liphlpapi -lcrypt32 -lwevtapi -lpdh -lwtsapi32 -lnetapi32 -lsecur32 -lncrypt
+	$(CC) $(LDFLAGS) $(HARDEN_LDFLAGS) -o mrbig.exe $(OBJS) $(CLIENTLOGOBJS_32)  $(VER_RES) -lws2_32 -lpsapi -lole32 -loleaut32 -luuid -liphlpapi -lcrypt32 -lwevtapi -lpdh -lwtsapi32 -lnetapi32 -lsecur32 -lncrypt
 
 mrbig64.exe: $(OBJS) clientlog.o $(VER_RES)
 	@echo "Building mrbig64.exe"
-	$(CC) -o mrbig64.exe $(OBJS) $(CLIENTLOGOBJS_64)  $(VER_RES) -lws2_32 -lpsapi -lole32 -loleaut32 -luuid -liphlpapi -lcrypt32 -lwevtapi -lpdh -lwtsapi32 -lnetapi32 -lsecur32 -lncrypt
+	$(CC) $(LDFLAGS) $(HARDEN_LDFLAGS) -o mrbig64.exe $(OBJS) $(CLIENTLOGOBJS_64)  $(VER_RES) -lws2_32 -lpsapi -lole32 -loleaut32 -luuid -liphlpapi -lcrypt32 -lwevtapi -lpdh -lwtsapi32 -lnetapi32 -lsecur32 -lncrypt
 
 mrbignt.exe: $(NTOBJS)
-	$(CC) -o mrbignt.exe $(NTOBJS) -lws2_32 -lpsapi -lsecur32 -lcrypt32 -lncrypt
+	$(CC) $(LDFLAGS) $(HARDEN_LDFLAGS) -o mrbignt.exe $(NTOBJS) -lws2_32 -lpsapi -lsecur32 -lcrypt32 -lncrypt
 
 clientlog.o:
-	$(MAKE) -C ../clientlog objectfile PACKAGE="$(PACKAGE)" VERSION="$(FILEVER_STR)"
+	$(MAKE) -C ../clientlog objectfile PACKAGE="$(PACKAGE)" VERSION="$(FILEVER_STR)" EXTRA_CFLAGS="$(HARDEN_CFLAGS)"
 
 # evilbbd.exe: evilbbd.c
 #	$(CC) $(CFLAGS) -o evilbbd.exe evilbbd.c -lws2_32
 
 minibbd.exe: minibbd.c
-	$(CC) $(CFLAGS) -o minibbd.exe minibbd.c -lws2_32
+	$(CC) $(CFLAGS) $(LDFLAGS) $(HARDEN_LDFLAGS) -o minibbd.exe minibbd.c -lws2_32
 
 minicfg.exe: minicfg.c
-	$(CC) $(CFLAGS) -o minicfg.exe minicfg.c -lws2_32
+	$(CC) $(CFLAGS) $(LDFLAGS) $(HARDEN_LDFLAGS) -o minicfg.exe minicfg.c -lws2_32
 
 # version.exe: version.c
 #	$(CC) $(CFLAGS) -o version.exe version.c -lws2_32
@@ -134,7 +142,7 @@ minicfg.exe: minicfg.c
 #	$(CC) $(CFLAGS) -o svcscfg.exe svcscfg.c -lws2_32
 
 procs.exe: procs.c
-	$(CC) -DTESTING $(CFLAGS) -o procs.exe procs.c -lws2_32
+	$(CC) -DTESTING $(CFLAGS) $(LDFLAGS) $(HARDEN_LDFLAGS) -o procs.exe procs.c -lws2_32
 
 # procs2.exe: procs2.c
 #	$(CC) $(CFLAGS) -o procs2.exe procs2.c -lws2_32 -lpsapi
