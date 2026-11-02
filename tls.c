@@ -360,7 +360,6 @@ static int send_records(struct tls_connection *c, const char *message, size_t le
         SecBuffer buffers[4];
         SecBufferDesc desc;
         size_t chunk = length > sizes.cbMaximumMessage ? sizes.cbMaximumMessage : length;
-        unsigned int i;
         memset(buffers, 0, sizeof(buffers));
         buffers[0].BufferType = SECBUFFER_STREAM_HEADER;
         buffers[0].pvBuffer = record;
@@ -380,8 +379,10 @@ static int send_records(struct tls_connection *c, const char *message, size_t le
             SECURITY_STATUS status = EncryptMessage(&c->context, 0, &desc, 0);
             if (status != SEC_E_OK) { c->error = (DWORD)status; goto failure; }
         }
-        for (i = 0; i < 3; ++i)
-            if (!send_all(c, buffers[i].pvBuffer, buffers[i].cbBuffer)) goto failure;
+        /* Schannel's stream buffers occupy this single contiguous record.
+           Avoid delaying a tiny body/trailer behind Nagle's algorithm. */
+        if (!send_all(c, record, (size_t)buffers[0].cbBuffer +
+                      buffers[1].cbBuffer + buffers[2].cbBuffer)) goto failure;
         if (c->diagnostic) mrlog("TLS diagnostic: record queued plaintext=%llu encrypted=%lu/%lu/%lu",
             (unsigned long long)chunk, (unsigned long)buffers[0].cbBuffer,
             (unsigned long)buffers[1].cbBuffer, (unsigned long)buffers[2].cbBuffer);
@@ -427,6 +428,36 @@ static int close_notify(struct tls_connection *c, const char *name)
         FreeContextBuffer(output.pvBuffer);
     }
     return ok;
+}
+
+static int finish_socket(struct tls_connection *c)
+{
+    char discard[4096];
+    unsigned long long received = 0;
+    /* close_notify is queued, not a guarantee that TCP has delivered it.
+       Half-close writes, then drain the peer's final TLS traffic before closing.
+       Closing with unread session tickets can reset TCP and lose queued reports.
+       No response is interpreted as an application acknowledgment. */
+    if (shutdown(c->socket, SD_SEND) == SOCKET_ERROR) {
+        c->error = (DWORD)WSAGetLastError();
+        return 0;
+    }
+    while (active(c)) {
+        int count;
+        if (!wait_socket(c, 0)) return 0;
+        count = recv(c->socket, discard, sizeof(discard), 0);
+        if (count == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) continue;
+        if (!count) {
+            if (c->diagnostic) mrlog("TLS diagnostic: peer EOF drained=%llu", received);
+            return 1;
+        }
+        if (count == SOCKET_ERROR) {
+            c->error = (DWORD)WSAGetLastError();
+            return 0;
+        }
+        received += (unsigned int)count;
+    }
+    return 0;
 }
 
 int mr_tls_send(const struct sockaddr_in *address, const char *server_name,
@@ -524,6 +555,10 @@ int mr_tls_send(const struct sockaddr_in *address, const char *server_name,
         ok = close_notify(&c, server_name);
         if (c.diagnostic) mrlog("TLS diagnostic: close-notify result=%d code=0x%08lx",
             ok, (unsigned long)c.error);
+        if (ok) {
+            c.stage = "tcp-drain";
+            ok = finish_socket(&c);
+        }
     }
 cleanup:
     if (!ok) mrlog("TLS report to %s:%u (%s) failed: stage=%s code=0x%08lx; no plaintext fallback",

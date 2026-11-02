@@ -205,7 +205,8 @@ class SchannelTests(unittest.TestCase):
     def exchange(self, certificate="proxy.example", name="proxy.example",
                  root="test-root", thumbprint=None, stall=False, crl="valid", cancel=False,
                  tls13=False, reject_client=False, fragment=False, abrupt=False,
-                 repeat=1, renew=None, deny_key=False, revoke_client=False):
+                  repeat=1, renew=None, deny_key=False, revoke_client=False,
+                  close_stall=False):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = context.maximum_version = (ssl.TLSVersion.TLSv1_3 if tls13 else ssl.TLSVersion.TLSv1_2)
         context.load_cert_chain(self.root / (certificate + ".pem"), self.root / (certificate + ".key"))
@@ -277,6 +278,8 @@ class SchannelTests(unittest.TestCase):
                         while True:
                             chunk = stream.recv(4096)
                             if not chunk:
+                                if close_stall:
+                                    finished.wait(3)
                                 break
                             received.extend(chunk)
             except (ssl.SSLError, ConnectionError, TimeoutError, OSError) as error:
@@ -301,7 +304,7 @@ class SchannelTests(unittest.TestCase):
         if cancel:
             environment["MRBIG_TLS_CANCEL"] = "1"
         arguments = [str(port), name, self.thumbprint if thumbprint is None else thumbprint,
-            str(self.root / (root + ".pem")), "750" if stall and not cancel else "10000",
+            str(self.root / (root + ".pem")), "750" if (stall or close_stall) and not cancel else "10000",
             str(self.root / (crl + ".crl")) if crl is not None else ""]
         if deny_key:
             argument_file = self.root / "denied-key-arguments.json"
@@ -332,6 +335,20 @@ class SchannelTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(received, b"x" * 65536)
         self.assertFalse(failures)
+
+    def test_peer_close_wait_has_deadline(self):
+        code, received, elapsed, _ = self.exchange(close_stall=True)
+        self.assertEqual(code, 1, self.last_probe_stderr)
+        self.assertEqual(len(received), 65536)
+        self.assertIn('stage=tcp-drain', self.last_probe_stderr)
+        self.assertLess(elapsed, 3)
+
+    def test_peer_close_wait_observes_cancellation(self):
+        code, received, elapsed, _ = self.exchange(close_stall=True, cancel=True)
+        self.assertEqual(code, 1, self.last_probe_stderr)
+        self.assertEqual(len(received), 65536)
+        self.assertIn('stage=tcp-drain', self.last_probe_stderr)
+        self.assertLess(elapsed, 3)
 
     def test_wrong_hostname_sends_no_report(self):
         code, received, _, _ = self.exchange(name="wrong.example")
