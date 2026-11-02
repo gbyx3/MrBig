@@ -16,7 +16,23 @@ try {
 } finally { $key.Dispose() }
 if (-not $file.Exists) { throw 'Disposable Software KSP key file missing' }
 $section = [Security.AccessControl.AccessControlSections]::Access
-$original = [IO.FileSystemAclExtensions]::GetAccessControl($file).GetSecurityDescriptorSddlForm($section)
+$initial = [IO.FileSystemAclExtensions]::GetAccessControl($file)
+$original = $initial.GetSecurityDescriptorSddlForm($section)
+$originalOwner = $initial.GetOwner([Security.Principal.SecurityIdentifier]).Value
+
+function Get-DaclSignature([string]$Sddl) {
+    $raw = [Security.AccessControl.RawSecurityDescriptor]::new($Sddl)
+    $entries = @()
+    foreach ($ace in $raw.DiscretionaryAcl) {
+        $bytes = [byte[]]::new($ace.BinaryLength)
+        $ace.GetBinaryForm($bytes, 0)
+        $entries += [Convert]::ToBase64String($bytes)
+    }
+    # Windows may update auto-inheritance bookkeeping on SetAccessControl.
+    # Do not ignore owner, protection, null-vs-empty ACLs, ACE contents or order.
+    return ([ordered]@{control=([int]$raw.ControlFlags -band 0x1004);
+        nullDacl=($null -eq $raw.DiscretionaryAcl);aces=$entries} | ConvertTo-Json -Compress)
+}
 $denied = [IO.FileSystemAclExtensions]::GetAccessControl($file)
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
 $denied.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
@@ -36,8 +52,12 @@ try {
         $restore = [Security.AccessControl.FileSecurity]::new()
         $restore.SetSecurityDescriptorSddlForm($original, $section)
         [IO.FileSystemAclExtensions]::SetAccessControl($file, $restore)
-        $actual = [IO.FileSystemAclExtensions]::GetAccessControl($file).GetSecurityDescriptorSddlForm($section)
-        if ($actual -ne $original) { throw 'Disposable key ACL restore/readback mismatch' }
+        $readback = [IO.FileSystemAclExtensions]::GetAccessControl($file)
+        $actual = $readback.GetSecurityDescriptorSddlForm($section)
+        if ((Get-DaclSignature $actual) -ne (Get-DaclSignature $original) -or
+            $readback.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $originalOwner) {
+            throw 'Disposable key ACL restore/readback mismatch'
+        }
         [Console]::Error.WriteLine('Test ACL fixture: original ACL restored and read back')
     }
 }

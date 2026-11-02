@@ -279,6 +279,8 @@ class SchannelTests(unittest.TestCase):
                             received.extend(chunk)
             except (ssl.SSLError, ConnectionError, TimeoutError, OSError) as error:
                 failures.append(getattr(error, "reason", type(error).__name__))
+                if hasattr(error, "verify_code"):
+                    failures.append("X509_VERIFY_CODE=" + str(error.verify_code))
 
         def serve():
             with listener:
@@ -585,7 +587,7 @@ class SchannelTests(unittest.TestCase):
         code, received, _, failures = self.exchange(thumbprint=self.cng_thumbprint, revoke_client=True)
         self.assertEqual(code, 1, self.last_probe_stderr)
         self.assertFalse(received)
-        self.assertIn("CERTIFICATE_REVOKED", failures)
+        self.assertIn("X509_VERIFY_CODE=23", failures)
 
     def test_peer_disconnect(self):
         code, received, _, _ = self.exchange(abrupt=True)
