@@ -408,19 +408,23 @@ class SchannelTests(unittest.TestCase):
         self.assertEqual(len(received), 65536)
         self.assertFalse(failures)
 
-    def start_stunnel(self, backend_port, tls13):
+    def start_stunnel(self, backend_port, tls13, version):
         """Disposable loopback receiver: same verification/relay shape as Xymon."""
         binary = os.environ.get('MRBIG_STUNNEL')
         if not binary:
-            fixture = self.root / 'stunnel-fixture'
+            fixture = self.root / ('stunnel-fixture-' + version)
             executable = fixture / 'bin' / 'tstunnel.exe'
             if not executable.exists():
-                installer = self.root / 'stunnel-5.82-installer.exe'
+                digests = {
+                    '5.74': '8ce19cc782a64b0cacf32356249265ed16b3888e3578454853f5497726778d76',
+                    '5.82': '722c1ad626919af2b0034666b4d19cc4795e925c32f60e8f3c59af4fb3ad2dfc',
+                }
+                installer = self.root / ('stunnel-' + version + '-installer.exe')
                 subprocess.run(['curl.exe', '--fail', '--location', '--silent', '--show-error',
-                    'https://www.stunnel.org/downloads/stunnel-5.82-win64-installer.exe',
+                    'https://www.stunnel.org/archive/5.x/stunnel-' + version + '-win64-installer.exe',
                     '--output', str(installer)], check=True, capture_output=True, timeout=60)
                 self.assertEqual(hashlib.sha256(installer.read_bytes()).hexdigest(),
-                    '722c1ad626919af2b0034666b4d19cc4795e925c32f60e8f3c59af4fb3ad2dfc')
+                                 digests[version])
                 subprocess.run(['7z.exe', 'x', str(installer), '-o' + str(fixture), '-y'],
                                check=True, capture_output=True, timeout=30)
             binary = str(executable)
@@ -469,7 +473,8 @@ class SchannelTests(unittest.TestCase):
         self.fail('Disposable stunnel failed to start: ' +
                   (log.read_text(errors='replace') if log.exists() else 'no receiver log'))
 
-    def exercise_service(self, stall=False, tls13=False, stunnel=False):
+    def exercise_service(self, stall=False, tls13=False, stunnel=False,
+                         stunnel_version='5.82', session_tickets=2):
         """Install only a uniquely named disposable service on the hosted CI VM."""
         service = "MrBigTlsTest" + os.urandom(6).hex()
         directory = self.root / (service + " with spaces")
@@ -479,6 +484,7 @@ class SchannelTests(unittest.TestCase):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = context.maximum_version = (
             ssl.TLSVersion.TLSv1_3 if tls13 else ssl.TLSVersion.TLSv1_2)
+        context.num_tickets = session_tickets
         context.load_cert_chain(self.root / "proxy.example.pem", self.root / "proxy.example.key")
         context.load_verify_locations(self.root / "test-root.pem")
         context.verify_mode = ssl.CERT_REQUIRED
@@ -489,7 +495,7 @@ class SchannelTests(unittest.TestCase):
         port = listener.getsockname()[1]
         relay_log = None
         if stunnel:
-            port, relay_log = self.start_stunnel(port, tls13)
+            port, relay_log = self.start_stunnel(port, tls13, stunnel_version)
         finished = threading.Event()
         connected = threading.Event()
         report = threading.Event()
@@ -604,6 +610,15 @@ class SchannelTests(unittest.TestCase):
 
     def test_service_stunnel_tls13(self):
         self.exercise_service(stunnel=True, tls13=True)
+
+    def test_service_stunnel_574_tls12(self):
+        self.exercise_service(stunnel=True, stunnel_version='5.74')
+
+    def test_service_stunnel_574_tls13(self):
+        self.exercise_service(stunnel=True, tls13=True, stunnel_version='5.74')
+
+    def test_service_tls13_unread_session_tickets(self):
+        self.exercise_service(tls13=True, session_tickets=16)
 
     def test_service_stop_during_stalled_tls(self):
         self.exercise_service(stall=True)
