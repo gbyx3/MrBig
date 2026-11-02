@@ -10,6 +10,11 @@
     overlong paths, and exercise quoted service arguments with an external
     config path containing spaces. Acceptance for this addition pending.
 
+    Revision374f48b passed all28readiness tests on x86/x64, including key
+    denial/restoration and revoked-client rejection. Publish STOP_PENDING
+    before waking the worker so its final STOPPED report cannot be overwritten
+    by a late handler status update; revalidation required for that ordering fix.
+
 2026-11-02 Harden development builds
     Enable strong stack protection, static compiler support, ASLR/NX and
     high-entropy ASLR on x64. Zero PE linker timestamps and verify native

@@ -119,6 +119,9 @@ that does **not** constitute passing Schannel runtime validation.
   (start/stop/restart and stop during a stalled TLS handshake). These additions
   require their own passing CI. Handle-count tests are not exhaustive heap-leak
   or long-duration soak tests; config-driven renewal still needs pilot evidence.
+  Revision `374f48b` passed all 28 readiness tests on both architectures:
+  https://github.com/gbyx3/MrBig/actions/runs/41462306772.
+  The final STOP_PENDING-before-wakeup ordering fix requires its own CI run.
 - Validate configuration/trust-file ownership, parent-directory protections and
   administrator-only writes in deployment; the client does not yet enforce ACLs.
   Unknown, empty or truncated TLS configuration now disables TLS rather than

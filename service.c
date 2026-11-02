@@ -266,8 +266,6 @@ VOID WINAPI ServiceCtrlHandler (DWORD Opcode)
          break; 
  
        case SERVICE_CONTROL_STOP:
-	 mr_tls_cancel();
-         if (stop_event) SetEvent(stop_event);
          ServiceStatus.dwWin32ExitCode = 0; 
          ServiceStatus.dwCurrentState  = SERVICE_STOP_PENDING;
          ServiceStatus.dwControlsAccepted = 0;
@@ -282,7 +280,11 @@ VOID WINAPI ServiceCtrlHandler (DWORD Opcode)
                status); 
          } 
  
-         startup_log(" [MY_SERVICE] Leaving Service \n",0); 
+         /* Publish STOP_PENDING before waking the worker. Otherwise its final
+            STOPPED report can race with a late STOP_PENDING from this handler. */
+         if (stop_event) SetEvent(stop_event);
+         mr_tls_cancel();
+         startup_log(" [MY_SERVICE] Leaving Service \n",0);
          return; 
  
       case SERVICE_CONTROL_INTERROGATE: 
