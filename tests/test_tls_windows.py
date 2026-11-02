@@ -6,6 +6,7 @@ No live infrastructure, administrator keys, or system-root trust changes.
 """
 import datetime
 import contextlib
+import hashlib
 import json
 import os
 import shutil
@@ -409,6 +410,20 @@ class SchannelTests(unittest.TestCase):
 
     def start_stunnel(self, backend_port, tls13):
         """Disposable loopback receiver: same verification/relay shape as Xymon."""
+        binary = os.environ.get('MRBIG_STUNNEL')
+        if not binary:
+            fixture = self.root / 'stunnel-fixture'
+            executable = fixture / 'bin' / 'tstunnel.exe'
+            if not executable.exists():
+                installer = self.root / 'stunnel-5.82-installer.exe'
+                subprocess.run(['curl.exe', '--fail', '--location', '--silent', '--show-error',
+                    'https://www.stunnel.org/downloads/stunnel-5.82-win64-installer.exe',
+                    '--output', str(installer)], check=True, capture_output=True, timeout=60)
+                self.assertEqual(hashlib.sha256(installer.read_bytes()).hexdigest(),
+                    '722c1ad626919af2b0034666b4d19cc4795e925c32f60e8f3c59af4fb3ad2dfc')
+                subprocess.run(['7z.exe', 'x', str(installer), '-o' + str(fixture), '-y'],
+                               check=True, capture_output=True, timeout=30)
+            binary = str(executable)
         with socket.socket() as reservation:
             reservation.bind(('127.0.0.1', 0))
             port = reservation.getsockname()[1]
@@ -432,7 +447,7 @@ class SchannelTests(unittest.TestCase):
             'key = ' + str(self.root / 'proxy.example.key'), '']))
         # Extracted console binary only: no installer/service or machine trust edits.
         output = (directory / 'console.log').open('wb')
-        process = subprocess.Popen([os.environ['MRBIG_STUNNEL'], str(config)],
+        process = subprocess.Popen([binary, str(config)],
                                    stdout=output, stderr=subprocess.STDOUT)
         def cleanup():
             if process.poll() is None:
@@ -584,11 +599,9 @@ class SchannelTests(unittest.TestCase):
     def test_service_tls13_start_stop_restart(self):
         self.exercise_service(tls13=True)
 
-    @unittest.skipUnless(os.environ.get('MRBIG_STUNNEL'), 'Needs disposable stunnel receiver')
     def test_service_stunnel_tls12(self):
         self.exercise_service(stunnel=True)
 
-    @unittest.skipUnless(os.environ.get('MRBIG_STUNNEL'), 'Needs disposable stunnel receiver')
     def test_service_stunnel_tls13(self):
         self.exercise_service(stunnel=True, tls13=True)
 
