@@ -1,6 +1,8 @@
 #include "mrbig.h"
 #include "clientlog/clientlog.h"
 #include <stdio.h>
+#include "tls.h"
+#include "tls_endpoint.h"
 
 #define MEMSIZE 4
 #define PATTERN_SIZE (sizeof big_pattern)
@@ -13,6 +15,8 @@ static struct display {
 	int s;
 	char* pdata;
 	int remaining;
+	int tls;
+	char server_name[254];
 	struct display *next;
 } *mrdisplay;
 char cfgdir[256];
@@ -20,6 +24,7 @@ char pickupdir[256];
 char now[1024];
 static FILE *logfp = NULL;
 static int mrport, mrsleep, mrloop, mrttl;
+static struct mr_tls_config tls_config;
 int bootyellow, bootred;
 double dfyellow, dfred;
 int cpuyellow, cpured;
@@ -475,6 +480,8 @@ static void readcfg(void)
 	/* Set all defaults */
 	strlcpy(mrmachine, "localhost", sizeof mrmachine);
 	mrport = 1984;
+	memset(&tls_config, 0, sizeof(tls_config));
+	tls_config.timeout_ms = 10000;
 	while (mrdisplay) {
 		mp = mrdisplay;
 		mrdisplay = mp->next;
@@ -503,13 +510,14 @@ static void readcfg(void)
 
 	for (i = 0; get_cfg("mrbig", b, sizeof b, i); i++) {
 		if (b[0] == '#') continue;
-		if (sscanf(b, "%s %[^\n]", key, value) == 2) {
+		if (sscanf(b, "%255s %255[^\n]", key, value) == 2) {
 			if (!strcmp(key, "machine")) {
 				strlcpy(mrmachine, value, sizeof mrmachine);
 			} else if (!strcmp(key, "port")) {
 				mrport = atoi(value);
 			} else if (!strcmp(key, "display")) {
 				mp = big_malloc("readcfg: display", sizeof *mp);
+				memset(mp, 0, sizeof *mp);
 				memset(&mp->in_addr, 0, sizeof mp->in_addr);
 				mp->in_addr.sin_family = AF_INET;
 				p = strchr(value, ':');
@@ -522,6 +530,29 @@ static void readcfg(void)
 				mp->in_addr.sin_addr.s_addr = inet_addr(value);
 				mp->next = mrdisplay;
 				mrdisplay = mp;
+			} else if (!strcmp(key, "tls_display")) {
+				char address[16];
+				unsigned short port;
+				mp = big_malloc("readcfg: display", sizeof *mp);
+				memset(mp, 0, sizeof *mp);
+				mp->tls = 1;
+				/* Retain an invalid TLS-only entry on error: never downgrade. */
+				if (mr_tls_endpoint(value, address, &port, mp->server_name,
+				                    sizeof mp->server_name)) {
+					mp->in_addr.sin_family = AF_INET;
+					mp->in_addr.sin_addr.s_addr = inet_addr(address);
+					mp->in_addr.sin_port = htons(port);
+				} else mrlog("Invalid tls_display; destination disabled");
+				mp->next = mrdisplay;
+				mrdisplay = mp;
+			} else if (!strcmp(key, "tls_client_thumbprint")) {
+				/* Reject truncation rather than selecting a different identity. */
+				if (strlen(value) == 40)
+					strlcpy(tls_config.client_thumbprint, value,
+					        sizeof tls_config.client_thumbprint);
+				else tls_config.client_thumbprint[0] = '\0';
+			} else if (!strcmp(key, "tls_ca_file")) {
+				strlcpy(tls_config.ca_file, value, sizeof tls_config.ca_file);
 			} else if (!strcmp(key, "sleep")) {
 				mrsleep = atoi(value);
 			} else if (!strcmp(key, "ttl")) {
@@ -754,6 +785,12 @@ void send_update(char *p) {
     if (!start_winsock()) return;
 
     for (mp = mrdisplay; mp; mp = mp->next) {
+        if (mp->tls) {
+            mp->s = -1;
+            mr_tls_send(&mp->in_addr, mp->server_name, bind_addr,
+                        &tls_config, p, strlen(p));
+            continue;
+        }
         mp->s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (mp->s == -1) {
             mrlog("send_update: socket failed: %d", WSAGetLastError());
@@ -1199,4 +1236,3 @@ int main(int argc, char **argv)
 
 	return 0;
 }
-

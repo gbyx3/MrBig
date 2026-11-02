@@ -14,16 +14,16 @@ VER_RC=winver.rc
 VER_RES=winver.res
 
 CFLAGS=-Wall -Werror -O2 -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -g -ggdb -DPACKAGE=\"$(PACKAGE)\" -DVERSION=\"$(VERSION)\"
-DOCS=INSTALL EVENTS ChangeLog DEVELOPMENT TODO EXT LARRD logs.cmd testfile.txt
+DOCS=INSTALL EVENTS ChangeLog DEVELOPMENT TODO EXT LARRD logs.cmd testfile.txt TLS.md
 SRCS=cfg.c cpu.c disk.c memory.c msgs.c ntpskew.c procs.c svcs.c mrbig.c \
 	service.c readperf.c readlog.c ext_test.c \
-	strlcpy.c disphelper.c wmi.c
-HDRS=mrbig.h disphelper.h
+	strlcpy.c disphelper.c wmi.c tls.c tls_endpoint.c
+HDRS=mrbig.h disphelper.h tls.h tls_endpoint.h
 OBJS=cfg.o cpu.o disk.o memory.o msgs.o ntpskew.o procs.o svcs.o mrbig.o \
 	service.o readperf.o readlog.o ext_test.o \
-	strlcpy.o disphelper.o wmi.o
+	strlcpy.o disphelper.o wmi.o tls.o tls_endpoint.o
 NTOBJS=cfg.o cpu.o disk.o memory.o msgs.o ntpskew.o procsnt.o svcs.o mrbig.o \
-	service.o readperf.o readlog.o ext_test.o
+	service.o readperf.o readlog.o ext_test.o tls.o tls_endpoint.o
 CLIENTLOGOBJS=applications.o certificates.o clientversion.o clock.o cpuinfo.o bios.o date.o diskinfo.o domain.o \
 	eventlog.o ipconfig.o kbs.o osversion.o processes.o reboots.o registry.o runningservices.o startargs.o tcpconnections.o \
 	who.o winmemory.o winports.o winroute.o winuptime.o arena.o utils.o clientlog.o
@@ -96,7 +96,7 @@ mrwmi:
 	$(MAKE) -C X64 mrwmi.exe
 
 mrwmi.exe: $(OBJS) wmi.o disphelper.o
-	$(CC) -o mrwmi.exe $(OBJS) wmi.o disphelper.o -lws2_32 -lpsapi -lole32 -loleaut32 -luuid -lcrypt32 -lwevtapi -lpdh -lwtsapi32
+	$(CC) -o mrwmi.exe $(OBJS) wmi.o disphelper.o -lws2_32 -lpsapi -lole32 -loleaut32 -luuid -lcrypt32 -lwevtapi -lpdh -lwtsapi32 -lsecur32
 
 mrbig.exe: $(OBJS) clientlog.o $(VER_RES)
 	@echo "Building mrbig.exe"
@@ -107,7 +107,7 @@ mrbig64.exe: $(OBJS) clientlog.o $(VER_RES)
 	$(CC) -o mrbig64.exe $(OBJS) $(CLIENTLOGOBJS_64)  $(VER_RES) -lws2_32 -lpsapi -lole32 -loleaut32 -luuid -liphlpapi -lcrypt32 -lwevtapi -lpdh -lwtsapi32 -lnetapi32 -lsecur32
 
 mrbignt.exe: $(NTOBJS)
-	$(CC) -o mrbignt.exe $(NTOBJS) -lws2_32 -lpsapi
+	$(CC) -o mrbignt.exe $(NTOBJS) -lws2_32 -lpsapi -lsecur32 -lcrypt32
 
 clientlog.o:
 	$(MAKE) -C ../clientlog objectfile PACKAGE="$(PACKAGE)" VERSION="$(FILEVER_STR)"

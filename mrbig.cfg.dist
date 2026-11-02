@@ -25,6 +25,12 @@ display 10.0.4.5
 #display 192.168.1.24
 #display 127.0.0.1
 
+# Experimental native TLS (see TLS.md); do not enable before testing.
+# Use instead of a plaintext display entry; no plaintext fallback is performed.
+#tls_display 192.0.2.10:1985 proxy.example.org
+#tls_client_thumbprint 0123456789ABCDEF0123456789ABCDEF01234567
+#tls_ca_file C:\ProgramData\MrBig\transport-root.pem
+
 # How often the client runs the main loop (default: 300 seconds)
 #sleep 300
 

@@ -1,3 +1,10 @@
+2026-11-02 Experimental native Schannel TLS reporting
+    Add explicit tls_display destinations, machine-store client certificate
+    selection and connection-local private-CA trust, without plaintext fallback.
+    Cross-build x86/x64 and add portable parser/Windows integration tests.
+    Initial development only; revocation policy and Windows runtime acceptance
+    remain required before production use. See TLS.md.
+
 2026-10-26 Release MrBig-0.26.7
 
 2026-10-19 Release MrBig-0.26.7-rc5
@@ -408,4 +415,3 @@
 
 2004-10-05 Added event log scanning. Filter based on type, source or message.
     Replaced ad-hoc registry reading code with read_perfcounters.
-
