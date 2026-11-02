@@ -112,6 +112,9 @@ class SchannelTests(unittest.TestCase):
             "$p.Provider=[Security.Cryptography.CngProvider]::MicrosoftSoftwareKeyStorageProvider;"
             "$p.KeyCreationOptions=[Security.Cryptography.CngKeyCreationOptions]::MachineKey;"
             "$p.ExportPolicy=[Security.Cryptography.CngExportPolicies]::None;"
+            "$p.KeyUsage=[Security.Cryptography.CngKeyUsages]::Signing;"
+            "$p.Parameters.Add([Security.Cryptography.CngProperty]::new('Length',"
+            "[BitConverter]::GetBytes([int]3072),[Security.Cryptography.CngPropertyOptions]::None));"
             "$key=[Security.Cryptography.CngKey]::Create([Security.Cryptography.CngAlgorithm]::Rsa,'" + key_name + "',$p);"
             "$rsa=[Security.Cryptography.RSACng]::new($key);"
             "try{$request=[Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=" + name + "',$rsa,"
@@ -125,6 +128,8 @@ class SchannelTests(unittest.TestCase):
             raise AssertionError("Expected a non-exportable CNG machine key")
         import base64
         csr = x509.load_der_x509_csr(base64.b64decode(metadata["csr"]))
+        if csr.public_key().key_size < 2048:
+            raise AssertionError("CNG fixture must use a modern RSA key size")
         now = datetime.datetime.now(datetime.timezone.utc)
         cert = (x509.CertificateBuilder().subject_name(csr.subject).issuer_name(cls.ca.subject)
                 .public_key(csr.public_key()).serial_number(x509.random_serial_number())
@@ -250,7 +255,7 @@ class SchannelTests(unittest.TestCase):
                                     break
                                 received.extend(chunk)
             except (ssl.SSLError, ConnectionError, TimeoutError, OSError) as error:
-                failures.append(type(error).__name__)
+                failures.append(getattr(error, "reason", type(error).__name__))
 
         thread = threading.Thread(target=serve, daemon=True)
         thread.start()
@@ -306,7 +311,7 @@ class SchannelTests(unittest.TestCase):
 
     def test_nonexportable_cng_machine_key(self):
         code, received, _, failures = self.exchange(thumbprint=self.cng_thumbprint)
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 0, failures)
         self.assertEqual(len(received), 65536)
         self.assertFalse(failures)
 
