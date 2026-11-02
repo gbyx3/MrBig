@@ -1,57 +1,44 @@
-# Disposable test key only. Keep a parent handle so its ACL can always be restored.
+# Disposable Microsoft Software KSP machine key only. Never read its key bytes.
 param(
     [Parameter(Mandatory)][string]$KeyName,
     [Parameter(Mandatory)][string]$Probe,
     [Parameter(Mandatory)][string]$ProbeArgumentsFile
 )
 $ErrorActionPreference = 'Stop'
-$ProbeArguments = [string[]](Get-Content -LiteralPath $ProbeArgumentsFile -Raw | ConvertFrom-Json)
 if (-not $KeyName.StartsWith('MrBig-test-')) { throw 'Refusing a non-test key' }
-[Console]::Error.WriteLine('Test ACL fixture: initializing native helper')
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
-public static class TestCngAcl {
-    [DllImport("ncrypt.dll", CharSet=CharSet.Unicode)]
-    public static extern int NCryptGetProperty(SafeNCryptKeyHandle key, string name,
-        byte[] output, int length, out int used, int flags);
-    [DllImport("ncrypt.dll", CharSet=CharSet.Unicode)]
-    public static extern int NCryptSetProperty(SafeNCryptKeyHandle key, string name,
-        byte[] input, int length, int flags);
-}
-'@
+$ProbeArguments = [string[]](Get-Content -LiteralPath $ProbeArgumentsFile -Raw | ConvertFrom-Json)
 $key = [Security.Cryptography.CngKey]::Open($KeyName,
     [Security.Cryptography.CngProvider]::MicrosoftSoftwareKeyStorageProvider,
     [Security.Cryptography.CngKeyOpenOptions]::MachineKey)
-$original = $null
+try {
+    if (-not $key.IsMachineKey) { throw 'Expected a disposable machine key' }
+    $file = [IO.FileInfo]::new((Join-Path $env:ProgramData ('Microsoft\Crypto\Keys\' + $key.UniqueName)))
+} finally { $key.Dispose() }
+if (-not $file.Exists) { throw 'Disposable Software KSP key file missing' }
+$section = [Security.AccessControl.AccessControlSections]::Access
+$original = [IO.FileSystemAclExtensions]::GetAccessControl($file).GetSecurityDescriptorSddlForm($section)
+$denied = [IO.FileSystemAclExtensions]::GetAccessControl($file)
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$denied.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+    $sid, [Security.AccessControl.FileSystemRights]::Read,
+    [Security.AccessControl.AccessControlType]::Deny))
 $changed = $false
 $result = 2
 try {
-    $size = 0
-    $status = [TestCngAcl]::NCryptGetProperty($key.Handle, 'Security Descr', $null, 0, [ref]$size, 4)
-    if ($status -ne 0) { throw 'Cannot size disposable key ACL' }
-    $original = [byte[]]::new($size)
-    if ([TestCngAcl]::NCryptGetProperty($key.Handle, 'Security Descr', $original,
-            $original.Length, [ref]$size, 4) -ne 0) { throw 'Cannot preserve disposable key ACL' }
-    [Console]::Error.WriteLine('Test ACL fixture: original ACL preserved')
-    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
-        "D:P(D;;GR;;;$sid)(A;;GA;;;SY)(A;;GA;;;BA)")
-    $bytes = [byte[]]::new($descriptor.BinaryLength)
-    $descriptor.GetBinaryForm($bytes, 0)
-    if ([TestCngAcl]::NCryptSetProperty($key.Handle, 'Security Descr', $bytes,
-            $bytes.Length, 4) -ne 0) { throw 'Cannot deny disposable key use' }
+    # Preserve the existing owner and inheritance/protection state; add one denial.
+    [IO.FileSystemAclExtensions]::SetAccessControl($file, $denied)
     $changed = $true
     [Console]::Error.WriteLine('Test ACL fixture: denial applied; starting probe')
     & $Probe @ProbeArguments
     $result = $LASTEXITCODE
 } finally {
     if ($changed) {
-        if ([TestCngAcl]::NCryptSetProperty($key.Handle, 'Security Descr',
-                $original, $original.Length, 4) -ne 0) { throw 'Disposable key ACL restore failed' }
-        [Console]::Error.WriteLine('Test ACL fixture: original ACL restored')
+        $restore = [Security.AccessControl.FileSecurity]::new()
+        $restore.SetSecurityDescriptorSddlForm($original, $section)
+        [IO.FileSystemAclExtensions]::SetAccessControl($file, $restore)
+        $actual = [IO.FileSystemAclExtensions]::GetAccessControl($file).GetSecurityDescriptorSddlForm($section)
+        if ($actual -ne $original) { throw 'Disposable key ACL restore/readback mismatch' }
+        [Console]::Error.WriteLine('Test ACL fixture: original ACL restored and read back')
     }
-    $key.Dispose()
 }
 exit $result

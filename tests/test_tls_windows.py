@@ -35,6 +35,7 @@ class SchannelTests(unittest.TestCase):
         cls.probe = os.environ["MRBIG_TLS_PROBE"]
         cls.thumbprints = []
         cls.cng_keys = {}
+        cls.cng_serials = {}
         now = datetime.datetime.now(datetime.timezone.utc)
 
         def issue(name, issuer=None, issuer_key=None, ca=False, expired=False, client=False):
@@ -105,6 +106,15 @@ class SchannelTests(unittest.TestCase):
         cls.cng_thumbprint = cls.create_cng_identity("native-client")
         cls.renewed_thumbprint = cls.create_cng_identity("renewed-client")
         cls.expired_thumbprint = cls.create_cng_identity("expired-client", expired=True)
+        revoked_entry = (x509.RevokedCertificateBuilder()
+            .serial_number(cls.cng_serials[cls.cng_thumbprint])
+            .revocation_date(now - datetime.timedelta(hours=1)).build())
+        client_crl = (x509.CertificateRevocationListBuilder().issuer_name(ca.subject)
+            .last_update(now - datetime.timedelta(hours=1))
+            .next_update(now + datetime.timedelta(days=2))
+            .add_revoked_certificate(revoked_entry).sign(ca_key, hashes.SHA256()))
+        (cls.root / "client-revocation-bundle.pem").write_bytes(
+            ca.public_bytes(serialization.Encoding.PEM) + client_crl.public_bytes(serialization.Encoding.PEM))
 
     @classmethod
     def create_cng_identity(cls, name, expired=False):
@@ -148,6 +158,7 @@ class SchannelTests(unittest.TestCase):
         thumbprint = cert.fingerprint(hashes.SHA1()).hex().upper()
         cls.thumbprints.append(thumbprint)
         cls.cng_keys[thumbprint] = key_name
+        cls.cng_serials[thumbprint] = cert.serial_number
         subprocess.run(["pwsh.exe", "-NoProfile", "-NonInteractive", "-Command",
             "$ErrorActionPreference='Stop';"
             "$key=[Security.Cryptography.CngKey]::Open('" + key_name + "',"
@@ -192,11 +203,14 @@ class SchannelTests(unittest.TestCase):
     def exchange(self, certificate="proxy.example", name="proxy.example",
                  root="test-root", thumbprint=None, stall=False, crl="valid", cancel=False,
                  tls13=False, reject_client=False, fragment=False, abrupt=False,
-                 repeat=1, renew=None, deny_key=False):
+                 repeat=1, renew=None, deny_key=False, revoke_client=False):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = context.maximum_version = (ssl.TLSVersion.TLSv1_3 if tls13 else ssl.TLSVersion.TLSv1_2)
         context.load_cert_chain(self.root / (certificate + ".pem"), self.root / (certificate + ".key"))
-        context.load_verify_locations(self.root / ("other-root.pem" if reject_client else "test-root.pem"))
+        context.load_verify_locations(self.root / ("client-revocation-bundle.pem" if revoke_client else
+                                      "other-root.pem" if reject_client else "test-root.pem"))
+        if revoke_client:
+            context.verify_flags |= ssl.VERIFY_CRL_CHECK_LEAF
         context.verify_mode = ssl.CERT_REQUIRED
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
@@ -206,6 +220,7 @@ class SchannelTests(unittest.TestCase):
         received = bytearray()
         failures = []
         peers = []
+        finished = threading.Event()
 
         def serve_one():
             try:
@@ -268,6 +283,8 @@ class SchannelTests(unittest.TestCase):
         def serve():
             with listener:
                 for _ in range(repeat):
+                    if finished.is_set():
+                        break
                     serve_one()
 
         thread = threading.Thread(target=serve, daemon=True)
@@ -300,6 +317,7 @@ class SchannelTests(unittest.TestCase):
         self.last_probe_stdout = result.stdout
         self.last_probe_stderr = result.stderr
         elapsed = time.monotonic() - started
+        finished.set()
         thread.join(5)
         self.assertFalse(thread.is_alive(), "TLS test server did not terminate")
         self.last_peers = peers
@@ -379,7 +397,12 @@ class SchannelTests(unittest.TestCase):
         code, received, _, _ = self.exchange(thumbprint=self.cng_thumbprint, deny_key=True)
         self.assertEqual(code, 1, self.last_probe_stderr)
         self.assertIn("stage=private-key-access", self.last_probe_stderr)
+        self.assertIn("original ACL restored and read back", self.last_probe_stderr)
         self.assertFalse(received)
+        code, received, _, failures = self.exchange(thumbprint=self.cng_thumbprint)
+        self.assertEqual(code, 0, self.last_probe_stderr)
+        self.assertEqual(len(received), 65536)
+        self.assertFalse(failures)
 
     def exercise_service(self, stall=False):
         """Install only a uniquely named disposable service on the hosted CI VM."""
@@ -409,7 +432,9 @@ class SchannelTests(unittest.TestCase):
             f"tls_crl_file {self.root / 'valid.crl'}",
             "option no_clientlog", "option no_cpu", "option no_memory", "option no_disk",
             "option no_procs", "option no_svcs", "option no_wmi", "option no_ext"]
-        (directory / "mrbig.cfg").write_text("\n".join(config) + "\n")
+        config_file = self.root / (service + " selected config.cfg")
+        config_file.write_text("\n".join(config) + "\n")
+        image_path = '"' + str(binary) + '" -c "' + str(config_file) + '"'
 
         def serve():
             with listener:
@@ -458,6 +483,12 @@ class SchannelTests(unittest.TestCase):
         try:
             subprocess.run([str(binary), "-i" + service], check=True, timeout=10)
             installed = True
+            installed_path = json.loads(powershell(
+                "$s=Get-CimInstance Win32_Service -Filter \"Name='" + service + "'\";"
+                "@{path=$s.PathName}|ConvertTo-Json -Compress"))
+            self.assertEqual(installed_path["path"], '"' + str(binary) + '"')
+            subprocess.run(["sc.exe", "config", service, "binPath=", image_path],
+                           check=True, timeout=10)
             for _ in range(1 if stall else 2):
                 report.clear()
                 connected.clear()
@@ -465,7 +496,7 @@ class SchannelTests(unittest.TestCase):
                     "Start-Service -Name '" + service + "';"
                     "$s=Get-CimInstance Win32_Service -Filter \"Name='" + service + "'\";"
                     "@{processId=$s.ProcessId;path=$s.PathName}|ConvertTo-Json -Compress"))
-                self.assertEqual(metadata["path"], '"' + str(binary) + '"')
+                self.assertEqual(metadata["path"], image_path)
                 self.assertGreater(metadata["processId"], 0)
                 self.assertTrue((connected if stall else report).wait(10),
                                 "Service did not establish the expected reporting connection")
@@ -549,6 +580,12 @@ class SchannelTests(unittest.TestCase):
         code, received, _, _ = self.exchange(reject_client=True)
         self.assertEqual(code, 1)
         self.assertFalse(received)
+
+    def test_receiver_rejects_revoked_client(self):
+        code, received, _, failures = self.exchange(thumbprint=self.cng_thumbprint, revoke_client=True)
+        self.assertEqual(code, 1, self.last_probe_stderr)
+        self.assertFalse(received)
+        self.assertIn("CERTIFICATE_REVOKED", failures)
 
     def test_peer_disconnect(self):
         code, received, _, _ = self.exchange(abrupt=True)

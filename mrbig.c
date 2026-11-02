@@ -1193,6 +1193,7 @@ void mrbig(void)
 void usage(void)
 {
 	fprintf(stderr, "mrbig [-dmiut]\n");
+	fprintf(stderr, "\t-c file\tuse the selected local configuration file\n");
 	fprintf(stderr, "	-d	enable debugging (can appear several times on command line)\n");
 	fprintf(stderr, "	-m	enable memory allocation debugging\n");
 	fprintf(stderr, "	-i	install as service\n");
@@ -1229,6 +1230,11 @@ int main(int argc, char **argv)
 				fprintf(stderr, "No cfg file\n");
 				return EXIT_FAILURE;
 			}
+			if (strlen(argv[i]) >= sizeof cfgfile) {
+				fprintf(stderr, "Configuration path is too long\n");
+				return EXIT_FAILURE;
+			}
+			strlcpy(cfgfile, argv[i], sizeof cfgfile);
 		} else if (!strcmp(argv[i], "-d")) {
 			debug++;
 		} else if (!strcmp(argv[i], "-m")) {

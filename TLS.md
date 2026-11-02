@@ -44,6 +44,9 @@ tls_crl_file C:\ProgramData\MrBig\transport-issuer.crl
   the standalone CPU/memory/disk/process/service checks. Recommended for a
   minimal identity-server pilot: no raw process command lines, registry/event-log
   inventory or other clientlog sections are gathered by that report path.
+- `-c file` selects a local configuration file (overlong paths are rejected).
+  This fixes an upstream no-op argument. The pilot-readiness service tests use
+  an external config path containing spaces rather than an adjacent default.
 
 The prototype uses modern Schannel credentials (Windows10/Server2019 or newer),
 negotiating TLS1.2 or TLS1.3 where the OS enables it. SSL2/3 and TLS1.0/1.1 are

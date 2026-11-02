@@ -6,6 +6,10 @@
     selection and disposable Windows service lifecycle tests. Runtime acceptance
     pending; this is not production installation approval.
 
+    Correct -c configuration-file selection (previously a no-op), reject
+    overlong paths, and exercise quoted service arguments with an external
+    config path containing spaces. Acceptance for this addition pending.
+
 2026-11-02 Harden development builds
     Enable strong stack protection, static compiler support, ASLR/NX and
     high-entropy ASLR on x64. Zero PE linker timestamps and verify native
