@@ -406,7 +406,7 @@ class SchannelTests(unittest.TestCase):
         self.assertEqual(len(received), 65536)
         self.assertFalse(failures)
 
-    def exercise_service(self, stall=False):
+    def exercise_service(self, stall=False, tls13=False):
         """Install only a uniquely named disposable service on the hosted CI VM."""
         service = "MrBigTlsTest" + os.urandom(6).hex()
         directory = self.root / (service + " with spaces")
@@ -414,7 +414,8 @@ class SchannelTests(unittest.TestCase):
         binary = directory / "mrbig.exe"
         shutil.copy2(os.environ["MRBIG_CLIENT"], binary)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_2
+        context.minimum_version = context.maximum_version = (
+            ssl.TLSVersion.TLSv1_3 if tls13 else ssl.TLSVersion.TLSv1_2)
         context.load_cert_chain(self.root / "proxy.example.pem", self.root / "proxy.example.key")
         context.load_verify_locations(self.root / "test-root.pem")
         context.verify_mode = ssl.CERT_REQUIRED
@@ -427,7 +428,7 @@ class SchannelTests(unittest.TestCase):
         connected = threading.Event()
         report = threading.Event()
         count = [0]
-        config = ["[mrbig]", "machine pilot.example", "sleep 300", "loop 300",
+        config = ["[mrbig]", "machine pilot.example", "sleep 300", "loop 300", "ttl 15",
             f"tls_display 127.0.0.1:{port} proxy.example",
             f"tls_client_thumbprint {self.cng_thumbprint}",
             f"tls_ca_file {self.root / 'test-root.pem'}",
@@ -524,6 +525,9 @@ class SchannelTests(unittest.TestCase):
 
     def test_service_start_stop_restart(self):
         self.exercise_service()
+
+    def test_service_tls13_start_stop_restart(self):
+        self.exercise_service(tls13=True)
 
     def test_service_stop_during_stalled_tls(self):
         self.exercise_service(stall=True)
