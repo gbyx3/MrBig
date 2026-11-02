@@ -11,6 +11,7 @@ struct mr_tls_config {
     DWORD timeout_ms;
     ULONGLONG report_deadline;
     int invalid;
+    int diagnostic; /* metadata only; never log report/certificate/key contents */
 };
 
 /* One report per connection. Returns 0 on failure; never retries in plaintext. */

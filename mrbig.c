@@ -805,6 +805,7 @@ void send_update(char *p) {
     struct linger l_optval;
     unsigned long nonblock;
     struct mr_tls_config report_tls = tls_config;
+    report_tls.diagnostic = debug > 0;
 
     /* One aggregate TLS budget, rather than ten seconds per dead destination. */
     report_tls.report_deadline = GetTickCount64() + report_tls.timeout_ms;

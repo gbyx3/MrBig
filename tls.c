@@ -31,6 +31,7 @@ struct tls_connection {
     ULONGLONG deadline;
     const char *stage;
     DWORD error;
+    int diagnostic;
 };
 
 static volatile LONG cancelled;
@@ -349,6 +350,9 @@ static int send_records(struct tls_connection *c, const char *message, size_t le
         c->error = status != SEC_E_OK ? (DWORD)status : ERROR_INVALID_DATA;
         return 0;
     }
+    if (c->diagnostic) mrlog("TLS diagnostic: report bytes=%llu header=%lu trailer=%lu maximum=%lu",
+        (unsigned long long)length, (unsigned long)sizes.cbHeader,
+        (unsigned long)sizes.cbTrailer, (unsigned long)sizes.cbMaximumMessage);
     capacity = (size_t)sizes.cbHeader + sizes.cbMaximumMessage + sizes.cbTrailer;
     record = malloc(capacity);
     if (!record) { c->error = ERROR_NOT_ENOUGH_MEMORY; return 0; }
@@ -378,6 +382,9 @@ static int send_records(struct tls_connection *c, const char *message, size_t le
         }
         for (i = 0; i < 3; ++i)
             if (!send_all(c, buffers[i].pvBuffer, buffers[i].cbBuffer)) goto failure;
+        if (c->diagnostic) mrlog("TLS diagnostic: record queued plaintext=%llu encrypted=%lu/%lu/%lu",
+            (unsigned long long)chunk, (unsigned long)buffers[0].cbBuffer,
+            (unsigned long)buffers[1].cbBuffer, (unsigned long)buffers[2].cbBuffer);
         message += chunk;
         length -= chunk;
     }
@@ -444,6 +451,7 @@ int mr_tls_send(const struct sockaddr_in *address, const char *server_name,
     c.socket = INVALID_SOCKET;
     c.stage = "configuration";
     c.error = ERROR_INVALID_PARAMETER;
+    c.diagnostic = config->diagnostic;
     if (config->invalid || !server_name[0] || !config->timeout_ms || config->timeout_ms > 60000 ||
         (config->ca_file[0] && !mr_tls_local_path(config->ca_file)) ||
         (config->crl_file[0] && !mr_tls_local_path(config->crl_file)))
@@ -502,11 +510,20 @@ int mr_tls_send(const struct sockaddr_in *address, const char *server_name,
     if (!handshake(&c, server_name)) goto cleanup;
     if (!active(&c) || !verify_server(&c, server_name, config))
         goto cleanup;
+    if (c.diagnostic) {
+        SecPkgContext_ConnectionInfo info;
+        if (QueryContextAttributes(&c.context, SECPKG_ATTR_CONNECTION_INFO, &info) == SEC_E_OK)
+            mrlog("TLS diagnostic: authenticated protocol=0x%08lx cipher=0x%08lx bits=%lu",
+                (unsigned long)info.dwProtocol, (unsigned long)info.aiCipher,
+                (unsigned long)info.dwCipherStrength);
+    }
     c.stage = "report-write";
     c.error = 0;
     if (send_records(&c, message, length)) {
         c.stage = "close-notify";
         ok = close_notify(&c, server_name);
+        if (c.diagnostic) mrlog("TLS diagnostic: close-notify result=%d code=0x%08lx",
+            ok, (unsigned long)c.error);
     }
 cleanup:
     if (!ok) mrlog("TLS report to %s:%u (%s) failed: stage=%s code=0x%08lx; no plaintext fallback",
