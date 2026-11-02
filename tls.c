@@ -1,6 +1,7 @@
 /* Native Windows transport. No OpenSSL dependency or private-key export. */
 #define _WIN32_WINNT 0x0601
 #define SECURITY_WIN32
+#define SCHANNEL_USE_BLACKLISTS
 #include <winsock2.h>
 #include <windows.h>
 #include <security.h>
@@ -10,7 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <ncrypt.h>
 #include "tls.h"
+#include "tls_endpoint.h"
 
 extern void mrlog(char *, ...);
 
@@ -26,25 +29,58 @@ struct tls_connection {
     int have_credentials;
     int have_context;
     ULONGLONG deadline;
+    const char *stage;
+    DWORD error;
 };
+
+static volatile LONG cancelled;
+
+void mr_tls_cancel(void)
+{
+    InterlockedExchange(&cancelled, 1);
+}
+
+static int active(struct tls_connection *c)
+{
+    if (InterlockedCompareExchange(&cancelled, 0, 0)) {
+        c->error = ERROR_OPERATION_ABORTED;
+        return 0;
+    }
+    if (GetTickCount64() >= c->deadline) {
+        c->error = WAIT_TIMEOUT;
+        return 0;
+    }
+    return 1;
+}
 
 static int wait_socket(struct tls_connection *c, int writing)
 {
     fd_set ready, errors;
     struct timeval timeout;
-    ULONGLONG now = GetTickCount64(), remaining;
+    ULONGLONG remaining;
     int result;
-    if (now >= c->deadline) return 0;
-    remaining = c->deadline - now;
-    timeout.tv_sec = (long)(remaining / 1000);
-    timeout.tv_usec = (long)((remaining % 1000) * 1000);
+    while (active(c)) {
+    {
+        ULONGLONG now = GetTickCount64();
+        if (now >= c->deadline) continue;
+        remaining = c->deadline - now;
+    }
+    if (remaining > 100) remaining = 100; /* observe service cancellation promptly */
+    timeout.tv_sec = 0;
+    timeout.tv_usec = (long)(remaining * 1000);
     FD_ZERO(&ready);
     FD_ZERO(&errors);
     FD_SET(c->socket, &ready);
     FD_SET(c->socket, &errors);
     result = select(0, writing ? NULL : &ready, writing ? &ready : NULL,
                     &errors, &timeout);
-    return result > 0 && !FD_ISSET(c->socket, &errors);
+    if (result == SOCKET_ERROR) {
+        c->error = (DWORD)WSAGetLastError();
+        return 0;
+    }
+    if (result > 0) return 1; /* caller checks SO_ERROR/recv/send, including reset */
+    }
+    return 0;
 }
 
 static int send_all(struct tls_connection *c, const void *data, size_t length)
@@ -55,7 +91,10 @@ static int send_all(struct tls_connection *c, const void *data, size_t length)
         if (!wait_socket(c, 1)) return 0;
         sent = send(c->socket, p, (int)(length > INT_MAX ? INT_MAX : length), 0);
         if (sent == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) continue;
-        if (sent <= 0) return 0;
+        if (sent <= 0) {
+            c->error = sent ? (DWORD)WSAGetLastError() : WSAECONNRESET;
+            return 0;
+        }
         p += sent;
         length -= sent;
     }
@@ -90,12 +129,43 @@ static PCCERT_CONTEXT client_certificate(const char *thumbprint)
     return certificate;
 }
 
+static int supplied_crl_valid(PCCRL_CONTEXT crl, PCCERT_CHAIN_CONTEXT chain)
+{
+    DWORD i, j;
+    if ((!crl->pCrlInfo->NextUpdate.dwLowDateTime &&
+         !crl->pCrlInfo->NextUpdate.dwHighDateTime) ||
+        CertVerifyCRLTimeValidity(NULL, crl->pCrlInfo)) return 0;
+    for (i = 0; i < chain->cChain; ++i) {
+        PCERT_SIMPLE_CHAIN simple = chain->rgpChain[i];
+        for (j = 0; j + 1 < simple->cElement; ++j) {
+            PCCERT_CONTEXT subject = simple->rgpElement[j]->pCertContext;
+            PCCERT_CONTEXT issuer = simple->rgpElement[j + 1]->pCertContext;
+            PCRL_ENTRY entry = NULL;
+            BYTE usage = 0;
+            if (!CertCompareCertificateName(X509_ASN_ENCODING, &crl->pCrlInfo->Issuer,
+                                             &issuer->pCertInfo->Subject)) continue;
+            if (!CertIsValidCRLForCertificate(subject, crl, 0, NULL)) continue;
+            if (CertGetIntendedKeyUsage(X509_ASN_ENCODING, issuer->pCertInfo,
+                                        &usage, sizeof(usage)) && !(usage & CERT_CRL_SIGN_KEY_USAGE))
+                return 0;
+            if (!CryptVerifyCertificateSignatureEx(0, X509_ASN_ENCODING,
+                    CRYPT_VERIFY_CERT_SIGN_SUBJECT_CRL, (void *)crl,
+                    CRYPT_VERIFY_CERT_SIGN_ISSUER_CERT, (void *)issuer, 0, NULL) ||
+                !CertFindCertificateInCRL(subject, crl, 0, NULL, &entry) || entry)
+                return 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int verify_server(struct tls_connection *c, const char *name,
                          const struct mr_tls_config *config)
 {
     PCCERT_CONTEXT peer = NULL, root = NULL;
+    PCCRL_CONTEXT crl = NULL;
     PCCERT_CHAIN_CONTEXT chain = NULL;
-    HCERTSTORE roots = NULL;
+    HCERTSTORE roots = NULL, additional = NULL, collection = NULL;
     HCERTCHAINENGINE engine = NULL;
     CERT_CHAIN_ENGINE_CONFIG engine_config;
     CERT_CHAIN_PARA parameters;
@@ -106,10 +176,29 @@ static int verify_server(struct tls_connection *c, const char *name,
     LPSTR usage = szOID_PKIX_KP_SERVER_AUTH;
     int ok = 0;
 
+    memset(&status, 0, sizeof(status));
+    c->stage = "server-chain";
+    c->error = 0;
+
     if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1,
                              server_name, 256)) goto cleanup;
     if (QueryContextAttributes(&c->context, SECPKG_ATTR_REMOTE_CERT_CONTEXT,
                                &peer) != SEC_E_OK) goto cleanup;
+    additional = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, NULL);
+    collection = CertOpenStore(CERT_STORE_PROV_COLLECTION, 0, 0, 0, NULL);
+    if (!additional || !collection ||
+        !CertAddStoreToCollection(collection, additional, 0, 0) ||
+        !CertAddStoreToCollection(collection, peer->hCertStore, 0, 0)) goto cleanup;
+    if (config->crl_file[0]) {
+        WCHAR crl_path[MAX_PATH];
+        if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, config->crl_file,
+                                 -1, crl_path, MAX_PATH) ||
+            !CryptQueryObject(CERT_QUERY_OBJECT_FILE, crl_path,
+                CERT_QUERY_CONTENT_FLAG_CRL, CERT_QUERY_FORMAT_FLAG_ALL, 0,
+                NULL, NULL, NULL, NULL, NULL, (const void **)&crl) ||
+            !CertAddCRLContextToStore(additional, crl, CERT_STORE_ADD_ALWAYS, NULL))
+            goto cleanup;
+    }
     if (config->ca_file[0]) {
         /* Private trust applies only to this connection, never LocalMachine Root. */
         if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, config->ca_file,
@@ -133,11 +222,19 @@ static int verify_server(struct tls_connection *c, const char *name,
     parameters.RequestedUsage.dwType = USAGE_MATCH_TYPE_AND;
     parameters.RequestedUsage.Usage.cUsageIdentifier = 1;
     parameters.RequestedUsage.Usage.rgpszUsageIdentifier = &usage;
-    /* No network retrieval during validation; cached intermediates are permitted.
-       Revocation policy is a follow-up before production acceptance. */
+    /* Strict offline policy: fresh cached revocation or an administrator-supplied
+       signed CRL is required for every non-root certificate. Never soft-fail or
+       fetch arbitrary certificate URLs from a privileged monitoring process. */
     if (!CertGetCertificateChain(engine ? engine : HCCE_LOCAL_MACHINE, peer,
-            NULL, peer->hCertStore, &parameters,
-            CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL, NULL, &chain)) goto cleanup;
+            NULL, collection, &parameters,
+            CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL | CERT_CHAIN_DISABLE_AIA |
+            CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT |
+            CERT_CHAIN_REVOCATION_CHECK_CACHE_ONLY, NULL, &chain)) goto cleanup;
+    /* A supplied stale/corrupt/revoking CRL must not be masked by cached evidence. */
+    if (crl && !supplied_crl_valid(crl, chain)) {
+        c->error = CRYPT_E_REVOCATION_OFFLINE;
+        goto cleanup;
+    }
     memset(&ssl_policy, 0, sizeof(ssl_policy));
     ssl_policy.cbSize = sizeof(ssl_policy);
     ssl_policy.dwAuthType = AUTHTYPE_SERVER;
@@ -150,6 +247,10 @@ static int verify_server(struct tls_connection *c, const char *name,
     ok = CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_SSL, chain,
                                           &policy, &status) && !status.dwError;
 cleanup:
+    if (!ok && !c->error) c->error = status.dwError ? status.dwError : GetLastError();
+    if (collection) CertCloseStore(collection, 0);
+    if (additional) CertCloseStore(additional, 0);
+    if (crl) CertFreeCRLContext(crl);
     if (chain) CertFreeCertificateChain(chain);
     if (engine) CertFreeCertificateChainEngine(engine);
     if (roots) CertCloseStore(roots, 0);
@@ -162,7 +263,7 @@ static int handshake(struct tls_connection *c, const char *name)
 {
     BYTE *input = malloc(TLS_INPUT_SIZE);
     size_t used = 0;
-    SECURITY_STATUS result;
+    SECURITY_STATUS result = SEC_E_INTERNAL_ERROR;
     DWORD attributes;
     TimeStamp expiry;
     int first = 1, read_more = 0, ok = 0;
@@ -170,7 +271,7 @@ static int handshake(struct tls_connection *c, const char *name)
     for (;;) {
         SecBuffer in_buffers[2], out_buffer;
         SecBufferDesc in_desc, out_desc;
-        if (GetTickCount64() >= c->deadline) break;
+        if (!active(c)) break;
         if (read_more) {
             int received;
             if (used == TLS_INPUT_SIZE || !wait_socket(c, 0)) break;
@@ -178,7 +279,10 @@ static int handshake(struct tls_connection *c, const char *name)
                              (int)(TLS_INPUT_SIZE - used), 0);
             if (received == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK)
                 continue;
-            if (received <= 0) break;
+            if (received <= 0) {
+                c->error = received ? (DWORD)WSAGetLastError() : WSAECONNRESET;
+                break;
+            }
             used += received;
         }
         memset(in_buffers, 0, sizeof(in_buffers));
@@ -198,6 +302,8 @@ static int handshake(struct tls_connection *c, const char *name)
                 first ? NULL : &c->context, (SEC_CHAR *)name, TLS_FLAGS, 0,
                 SECURITY_NATIVE_DREP, first ? NULL : &in_desc, 0,
                 &c->context, &out_desc, &attributes, &expiry);
+        if (result != SEC_E_OK && result != SEC_I_CONTINUE_NEEDED &&
+            result != SEC_E_INCOMPLETE_MESSAGE) c->error = (DWORD)result;
         if (result == SEC_E_OK || result == SEC_I_CONTINUE_NEEDED ||
             result == SEC_E_INCOMPLETE_MESSAGE || result == SEC_I_INCOMPLETE_CREDENTIALS)
             c->have_context = 1;
@@ -262,7 +368,10 @@ static int send_records(struct tls_connection *c, const char *message, size_t le
         desc.ulVersion = SECBUFFER_VERSION;
         desc.cBuffers = 4;
         desc.pBuffers = buffers;
-        if (EncryptMessage(&c->context, 0, &desc, 0) != SEC_E_OK) goto failure;
+        {
+            SECURITY_STATUS status = EncryptMessage(&c->context, 0, &desc, 0);
+            if (status != SEC_E_OK) { c->error = (DWORD)status; goto failure; }
+        }
         for (i = 0; i < 3; ++i)
             if (!send_all(c, buffers[i].pvBuffer, buffers[i].cbBuffer)) goto failure;
         message += chunk;
@@ -290,7 +399,8 @@ static int close_notify(struct tls_connection *c, const char *name)
     control.ulVersion = SECBUFFER_VERSION;
     control.cBuffers = 1;
     control.pBuffers = &token;
-    if (ApplyControlToken(&c->context, &control) != SEC_E_OK) return 0;
+    status = ApplyControlToken(&c->context, &control);
+    if (status != SEC_E_OK) { c->error = (DWORD)status; return 0; }
     memset(&output, 0, sizeof(output));
     output.BufferType = SECBUFFER_TOKEN;
     response.ulVersion = SECBUFFER_VERSION;
@@ -300,6 +410,7 @@ static int close_notify(struct tls_connection *c, const char *name)
             (SEC_CHAR *)name, TLS_FLAGS, 0, SECURITY_NATIVE_DREP, NULL, 0,
             &c->context, &response, &attributes, &expiry);
     ok = status == SEC_E_OK || status == SEC_I_CONTEXT_EXPIRED;
+    if (!ok) c->error = (DWORD)status;
     if (output.pvBuffer) {
         if (ok) ok = send_all(c, output.pvBuffer, output.cbBuffer);
         FreeContextBuffer(output.pvBuffer);
@@ -312,51 +423,93 @@ int mr_tls_send(const struct sockaddr_in *address, const char *server_name,
                 const char *message, size_t length)
 {
     struct tls_connection c;
-    SCHANNEL_CRED credentials;
+    SCH_CREDENTIALS credentials;
+    TLS_PARAMETERS protocols;
     PCCERT_CONTEXT client = NULL;
     struct sockaddr_in local;
     TimeStamp expiry;
     unsigned long nonblocking = 1;
     int error = 0, ok = 0;
     int error_size = sizeof(error);
+    SECURITY_STATUS security_status;
+    HCRYPTPROV_OR_NCRYPT_KEY_HANDLE key = 0;
+    DWORD key_spec = 0;
+    BOOL free_key = FALSE;
 
     memset(&c, 0, sizeof(c));
     c.socket = INVALID_SOCKET;
-    if (!server_name[0] || !config->timeout_ms || config->timeout_ms > 60000)
+    c.stage = "configuration";
+    c.error = ERROR_INVALID_PARAMETER;
+    if (config->invalid || !server_name[0] || !config->timeout_ms || config->timeout_ms > 60000 ||
+        (config->ca_file[0] && !mr_tls_local_path(config->ca_file)) ||
+        (config->crl_file[0] && !mr_tls_local_path(config->crl_file)))
         goto cleanup;
     c.deadline = GetTickCount64() + config->timeout_ms;
+    if (config->report_deadline && config->report_deadline < c.deadline)
+        c.deadline = config->report_deadline;
+    if (!active(&c)) goto cleanup;
+    c.stage = "client-certificate";
     client = client_certificate(config->client_thumbprint);
-    if (!client) goto cleanup;
+    if (!client) { c.error = CRYPT_E_NOT_FOUND; goto cleanup; }
+    c.error = CERT_E_EXPIRED;
+    if (CertVerifyTimeValidity(NULL, client->pCertInfo)) goto cleanup;
+    c.error = 0;
+    c.stage = "private-key-access";
+    if (!CryptAcquireCertificatePrivateKey(client, CRYPT_ACQUIRE_SILENT_FLAG |
+            CRYPT_ACQUIRE_COMPARE_KEY_FLAG | CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG,
+            NULL, &key, &key_spec, &free_key)) {
+        c.error = GetLastError();
+        goto cleanup;
+    }
     memset(&credentials, 0, sizeof(credentials));
-    credentials.dwVersion = SCHANNEL_CRED_VERSION;
+    credentials.dwVersion = SCH_CREDENTIALS_VERSION;
     credentials.cCreds = 1;
     credentials.paCred = &client;
-    credentials.grbitEnabledProtocols = SP_PROT_TLS1_2_CLIENT;
+    memset(&protocols, 0, sizeof(protocols));
+    protocols.grbitDisabledProtocols = SP_PROT_SSL2 | SP_PROT_SSL3 |
+                                       SP_PROT_TLS1_0 | SP_PROT_TLS1_1;
+    credentials.cTlsParameters = 1;
+    credentials.pTlsParameters = &protocols;
     credentials.dwFlags = SCH_CRED_MANUAL_CRED_VALIDATION |
                            SCH_CRED_NO_DEFAULT_CREDS | SCH_USE_STRONG_CRYPTO;
-    if (AcquireCredentialsHandleA(NULL, UNISP_NAME_A, SECPKG_CRED_OUTBOUND,
-            NULL, &credentials, NULL, NULL, &c.credentials, &expiry) != SEC_E_OK)
-        goto cleanup;
+    c.stage = "credentials";
+    security_status = AcquireCredentialsHandleA(NULL, UNISP_NAME_A, SECPKG_CRED_OUTBOUND,
+            NULL, &credentials, NULL, NULL, &c.credentials, &expiry);
+    if (security_status != SEC_E_OK) { c.error = (DWORD)security_status; goto cleanup; }
     c.have_credentials = 1;
+    c.stage = "socket";
     c.socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (c.socket == INVALID_SOCKET) goto cleanup;
+    if (c.socket == INVALID_SOCKET) { c.error = (DWORD)WSAGetLastError(); goto cleanup; }
     memset(&local, 0, sizeof(local));
     local.sin_family = AF_INET;
     local.sin_addr.s_addr = inet_addr(bind_address);
     if (bind(c.socket, (struct sockaddr *)&local, sizeof(local)) == SOCKET_ERROR ||
-        ioctlsocket(c.socket, FIONBIO, &nonblocking) == SOCKET_ERROR) goto cleanup;
+        ioctlsocket(c.socket, FIONBIO, &nonblocking) == SOCKET_ERROR) {
+        c.error = (DWORD)WSAGetLastError(); goto cleanup;
+    }
+    c.stage = "connect";
     if (connect(c.socket, (const struct sockaddr *)address, sizeof(*address)) == SOCKET_ERROR &&
-        WSAGetLastError() != WSAEWOULDBLOCK) goto cleanup;
+        WSAGetLastError() != WSAEWOULDBLOCK) { c.error = (DWORD)WSAGetLastError(); goto cleanup; }
     if (!wait_socket(&c, 1) ||
         getsockopt(c.socket, SOL_SOCKET, SO_ERROR, (char *)&error, &error_size) || error)
+        { if (error) c.error = (DWORD)error; goto cleanup; }
+    c.stage = "handshake";
+    if (!handshake(&c, server_name)) goto cleanup;
+    if (!active(&c) || !verify_server(&c, server_name, config))
         goto cleanup;
-    if (!handshake(&c, server_name) || !verify_server(&c, server_name, config))
-        goto cleanup;
+    c.stage = "report-write";
+    c.error = 0;
     ok = send_records(&c, message, length) && close_notify(&c, server_name);
 cleanup:
-    if (!ok) mrlog("TLS report failed (no plaintext fallback)");
+    if (!ok) mrlog("TLS report to %s:%u (%s) failed: stage=%s code=0x%08lx; no plaintext fallback",
+        inet_ntoa(address->sin_addr), (unsigned int)ntohs(address->sin_port),
+        server_name, c.stage, (unsigned long)c.error);
     if (c.have_context) DeleteSecurityContext(&c.context);
     if (c.have_credentials) FreeCredentialsHandle(&c.credentials);
+    if (free_key) {
+        if (key_spec == CERT_NCRYPT_KEY_SPEC) NCryptFreeObject(key);
+        else CryptReleaseContext(key, 0);
+    }
     if (client) CertFreeCertificateContext(client);
     if (c.socket != INVALID_SOCKET) closesocket(c.socket);
     return ok;

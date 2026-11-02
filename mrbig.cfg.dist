@@ -30,6 +30,7 @@ display 10.0.4.5
 #tls_display 192.0.2.10:1985 proxy.example.org
 #tls_client_thumbprint 0123456789ABCDEF0123456789ABCDEF01234567
 #tls_ca_file C:\ProgramData\MrBig\transport-root.pem
+#tls_crl_file C:\ProgramData\MrBig\transport-issuer.crl
 
 # How often the client runs the main loop (default: 300 seconds)
 #sleep 300

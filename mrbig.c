@@ -473,7 +473,7 @@ static void readcfg(void)
 {
 	char b[256], key[256], value[256], *p;
 	struct display *mp;
-	int i;
+	int i, cfg_result;
 
 	if (debug > 1) mrlog("readcfg()");
 
@@ -508,8 +508,19 @@ static void readcfg(void)
 	if (logfp) big_fclose("readcfg:logfile", logfp);
 	logfp = NULL;
 
-	for (i = 0; get_cfg("mrbig", b, sizeof b, i); i++) {
+	for (i = 0; (cfg_result = get_cfg("mrbig", b, sizeof b, i)); i++) {
 		if (b[0] == '#') continue;
+		/* A truncated security directive must never become a different trust path. */
+		if (cfg_result == 2) {
+			tls_config.invalid = 1;
+			mrlog("Truncated mrbig directive; TLS disabled for this configuration");
+			continue;
+		}
+		if (sscanf(b, "%255s", key) == 1 && !strncmp(key, "tls_", 4) &&
+		    sscanf(b, "%255s %255[^\n]", key, value) != 2) {
+			tls_config.invalid = 1;
+			continue;
+		}
 		if (sscanf(b, "%255s %255[^\n]", key, value) == 2) {
 			if (!strcmp(key, "machine")) {
 				strlcpy(mrmachine, value, sizeof mrmachine);
@@ -542,7 +553,10 @@ static void readcfg(void)
 					mp->in_addr.sin_family = AF_INET;
 					mp->in_addr.sin_addr.s_addr = inet_addr(address);
 					mp->in_addr.sin_port = htons(port);
-				} else mrlog("Invalid tls_display; destination disabled");
+				} else {
+					tls_config.invalid = 1;
+					mrlog("Invalid tls_display; TLS disabled for this configuration");
+				}
 				mp->next = mrdisplay;
 				mrdisplay = mp;
 			} else if (!strcmp(key, "tls_client_thumbprint")) {
@@ -550,9 +564,18 @@ static void readcfg(void)
 				if (strlen(value) == 40)
 					strlcpy(tls_config.client_thumbprint, value,
 					        sizeof tls_config.client_thumbprint);
-				else tls_config.client_thumbprint[0] = '\0';
+				else tls_config.invalid = 1;
 			} else if (!strcmp(key, "tls_ca_file")) {
-				strlcpy(tls_config.ca_file, value, sizeof tls_config.ca_file);
+				if (mr_tls_local_path(value))
+					strlcpy(tls_config.ca_file, value, sizeof tls_config.ca_file);
+				else tls_config.invalid = 1;
+			} else if (!strcmp(key, "tls_crl_file")) {
+				if (mr_tls_local_path(value))
+					strlcpy(tls_config.crl_file, value, sizeof tls_config.crl_file);
+				else tls_config.invalid = 1;
+			} else if (!strncmp(key, "tls_", 4)) {
+				tls_config.invalid = 1;
+				mrlog("Unknown TLS directive; TLS disabled for this configuration");
 			} else if (!strcmp(key, "sleep")) {
 				mrsleep = atoi(value);
 			} else if (!strcmp(key, "ttl")) {
@@ -781,6 +804,10 @@ void send_update(char *p) {
     struct sockaddr_in my_addr;
     struct linger l_optval;
     unsigned long nonblock;
+    struct mr_tls_config report_tls = tls_config;
+
+    /* One aggregate TLS budget, rather than ten seconds per dead destination. */
+    report_tls.report_deadline = GetTickCount64() + report_tls.timeout_ms;
 
     if (!start_winsock()) return;
 
@@ -788,7 +815,7 @@ void send_update(char *p) {
         if (mp->tls) {
             mp->s = -1;
             mr_tls_send(&mp->in_addr, mp->server_name, bind_addr,
-                        &tls_config, p, strlen(p));
+                        &report_tls, p, strlen(p));
             continue;
         }
         mp->s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -1081,9 +1108,7 @@ void mrbig(void)
 	if (debug) {
 		mrlog("mrbig()");
 	}
-	for (i = 0; _environ[i]; i++) {
-		startup_log("%s", _environ[i]);
-	}
+	/* Never dump the service environment: it can contain credentials/tokens. */
 	for (;;) {
 		if (debug) mrlog("main loop");
 		read_cfg("mrbig", cfgfile);

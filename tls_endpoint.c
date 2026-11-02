@@ -9,6 +9,23 @@ static int alnum_ascii(char c)
            (c >= '0' && c <= '9');
 }
 
+int mr_tls_local_path(const char *path)
+{
+    size_t i, start = 3, length = strlen(path);
+    if (length < 4 || length >= 260 ||
+        !((path[0] >= 'a' && path[0] <= 'z') ||
+          (path[0] >= 'A' && path[0] <= 'Z')) || path[1] != ':' ||
+        (path[2] != '\\' && path[2] != '/')) return 0;
+    for (i = 3; i <= length; ++i) {
+        unsigned char c = (unsigned char)path[i];
+        if (!c || c == '\\' || c == '/') {
+            if (i == start || path[i - 1] == '.' || path[i - 1] == ' ') return 0;
+            start = i + 1;
+        } else if (c < 32 || strchr(":*?\"<>|", c)) return 0;
+    }
+    return 1;
+}
+
 int mr_tls_endpoint(const char *value, char address[16], unsigned short *port,
                      char *name, size_t name_size)
 {

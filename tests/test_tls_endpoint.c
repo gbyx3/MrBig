@@ -33,6 +33,18 @@ int main(void)
         assert(!strcmp(address, "unchanged") && !strcmp(name, "unchanged") && port == 42);
     }
     assert(!mr_tls_endpoint("127.0.0.1:1985 proxy.example", address, &port, name, 5));
+    assert(mr_tls_local_path("C:\\ProgramData\\MrBig\\root.pem"));
+    assert(mr_tls_local_path("C:/Program Files/MrBig/root.pem"));
+    assert(!mr_tls_local_path("root.pem"));
+    assert(!mr_tls_local_path("C:root.pem"));
+    assert(!mr_tls_local_path("\\\\server\\share\\root.pem"));
+    assert(!mr_tls_local_path("\\\\?\\C:\\root.pem"));
+    assert(!mr_tls_local_path("C:\\root.pem:stream"));
+    assert(!mr_tls_local_path("C:\\..\\root.pem"));
+    assert(!mr_tls_local_path("C:\\root.pem "));
+    assert(!mr_tls_local_path("C:\\root.pem."));
+    assert(!mr_tls_local_path("C:\\root*.pem"));
+    assert(!mr_tls_local_path("C:\\root.pem\\"));
     puts("TLS endpoint parser tests passed");
     return 0;
 }

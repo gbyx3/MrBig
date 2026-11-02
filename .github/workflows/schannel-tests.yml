@@ -24,8 +24,8 @@ jobs:
           /tmp/test-tls-endpoint
       - name: Build isolated transport probes
         run: |
-          x86_64-w64-mingw32-gcc -Wall -Wextra -Werror -O2 -I. tests/tls_probe.c tls.c -lws2_32 -lsecur32 -lcrypt32 -o tests/tls_probe64.exe
-          i686-w64-mingw32-gcc -Wall -Wextra -Werror -O2 -I. tests/tls_probe.c tls.c -lws2_32 -lsecur32 -lcrypt32 -o tests/tls_probe32.exe
+          x86_64-w64-mingw32-gcc -Wall -Wextra -Werror -O2 -I. tests/tls_probe.c tls.c tls_endpoint.c -lws2_32 -lsecur32 -lcrypt32 -lncrypt -o tests/tls_probe64.exe
+          i686-w64-mingw32-gcc -Wall -Wextra -Werror -O2 -I. tests/tls_probe.c tls.c tls_endpoint.c -lws2_32 -lsecur32 -lcrypt32 -lncrypt -o tests/tls_probe32.exe
       - uses: actions/upload-artifact@v7
         with:
           name: unsigned-tls-development-probes

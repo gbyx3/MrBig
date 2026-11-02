@@ -1,3 +1,11 @@
+2026-11-02 Harden experimental TLS reporting
+    Require fail-closed offline revocation evidence, support modern Schannel
+    TLS1.2/1.3, silently acquire machine keys, bound aggregate socket waits and
+    observe service-stop cancellation. Add stage/status diagnostics and reject
+    malformed/truncated TLS settings. Remove unconditional environment logging.
+    Extend Windows tests for CRLs, non-exportable CNG keys and failure recovery;
+    expanded runtime acceptance pending. No production deployment performed.
+
 2026-11-02 Experimental native Schannel TLS reporting
     Add explicit tls_display destinations, machine-store client certificate
     selection and connection-local private-CA trust, without plaintext fallback.

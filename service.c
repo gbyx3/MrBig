@@ -1,4 +1,5 @@
 #include "mrbig.h"
+#include "tls.h"
 
 //#define SERVICE_NAME "MrBig"
 //#define DISPLAY_NAME "Mr Big Monitoring Agent"
@@ -223,8 +224,9 @@ VOID WINAPI ServiceCtrlHandler (DWORD Opcode)
          ServiceStatus.dwCurrentState = SERVICE_RUNNING; 
          break; 
  
-      case SERVICE_CONTROL_STOP: 
-      // Do whatever it takes to stop here. 
+       case SERVICE_CONTROL_STOP:
+       // Do whatever it takes to stop here.
+	 mr_tls_cancel();
 	 stop_winsock();
          ServiceStatus.dwWin32ExitCode = 0; 
          ServiceStatus.dwCurrentState  = SERVICE_STOPPED; 
@@ -260,4 +262,3 @@ VOID WINAPI ServiceCtrlHandler (DWORD Opcode)
    } 
    return; 
 }
-

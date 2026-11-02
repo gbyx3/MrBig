@@ -13,6 +13,7 @@ machine server.example.org
 tls_display 192.0.2.10:1985 proxy.example.org
 tls_client_thumbprint 0123456789ABCDEF0123456789ABCDEF01234567
 tls_ca_file C:\ProgramData\MrBig\transport-root.pem
+tls_crl_file C:\ProgramData\MrBig\transport-issuer.crl
 ```
 
 - `tls_display` requires numeric IPv4, explicit port and DNS verification name.
@@ -27,19 +28,32 @@ tls_ca_file C:\ProgramData\MrBig\transport-root.pem
   Paths with spaces are accepted without quoting. Restrict write access to
   configuration and CA files to administrators.
 - Configuration applies to every TLS destination regardless of directive order.
+- `tls_crl_file` supplies a signed PEM/DER CRL to the connection-local validation
+  store. Revocation validation is mandatory for every non-root server certificate;
+  absent, stale, incorrectly signed or revoking evidence fails closed. With no
+  local CRL, fresh Windows cached revocation evidence is required. There is no
+  ignore/off switch and no online retrieval by this transport. Plan protected,
+  atomic CRL refreshes and alert before nextUpdate; issuer chains may require
+  additional fresh evidence in the Windows cache. The root is excluded from
+  revocation checking; removing that configured trust anchor is the recovery
+  mechanism for a compromised root.
 - Existing `display` destinations retain their existing plaintext behavior.
   A TLS failure **never** falls back to those destinations automatically; if
   plaintext and TLS entries coexist, each is an independently configured target.
 
-The prototype uses Schannel TLS1.2, requiring a Windows version/patch level with
-TLS1.2 and exclusive-root chain-engine support. It validates server chain,
+The prototype uses modern Schannel credentials (Windows10/Server2019 or newer),
+negotiating TLS1.2 or TLS1.3 where the OS enables it. SSL2/3 and TLS1.0/1.1 are
+disabled. TLS1.3 requires Windows11/Server2022 or newer. It validates server chain,
 validity, serverAuth usage and hostname before sending application data. The
 client certificate is supplied explicitly; automatic anonymous retry is disabled.
 No custom encryption, OpenSSL DLLs, passwords or private-key files are involved.
 
-Socket connect, handshake and all report writes share a ten-second deadline per
-TLS destination. TLS destinations currently execute sequentially, before the
-legacy plaintext sending phase. Each report gets a fresh connection/credentials;
+Socket connect, handshake and all report writes share a ten-second budget across
+TLS destinations in each send_update call. Destinations currently execute
+sequentially; the existing plaintext phase is unchanged. Service-stop signaling
+cancels TLS socket waits, checked at most100ms apart. This does not redesign or
+prove prompt stopping of the legacy collectors/service as a whole.
+Each report gets a fresh connection/credentials;
 partial writes and TLS record sizing are handled, followed by close_notify.
 No durable spool or delivery acknowledgment is added: a successful write is not
 proof that the Xymon server processed the report.
@@ -48,7 +62,9 @@ proof that the Xymon server processed the report.
 
 `make -j4 all` cross-compiles the complete x86/x64 clients with MinGW-w64.
 No new runtime library dependency is added beyond Windows libraries already
-linked by the main client (`secur32`, `crypt32`, `ws2_32`).
+linked by the main client (`secur32`, `crypt32`, `ws2_32`) except Windows' native
+`ncrypt` library for machine-key acquisition/release. There is no new third-party
+runtime DLL dependency.
 
 Portable parser tests (macOS/Linux):
 
@@ -64,7 +80,11 @@ one local machine-store test identity and delete it and its key afterwards; they
 never install a system root or touch production infrastructure. Do not run them
 on production identity servers. Test coverage includes a 64KiB report, clean TLS
 shutdown, wrong hostname/root/EKU, expired server certificate, missing client
-identity and a stalled handshake deadline. Tests are skipped outside Windows;
+identity and a stalled handshake deadline. Hardening adds revocation evidence
+failures, non-exportable native CNG machine keys, renewed identities, fragmented
+handshakes, TLS1.3, rejected clients, peer disconnects and service cancellation.
+These expanded tests are pending Windows CI, not yet accepted.
+Tests are skipped outside Windows;
 that does **not** constitute passing Schannel runtime validation.
 
 ## Before production acceptance
@@ -72,12 +92,16 @@ that does **not** constitute passing Schannel runtime validation.
 - Obtain passing Windows integration results for both architectures and review
   packet fragmentation, credential renewal/reload, inaccessible/non-exportable
   CNG keys, expired/rejected client certificates and peer disconnects.
-- Define and implement an explicit revocation policy. The current prototype
-  uses cache-only chain building **without requesting revocation checking**;
-  do not describe it as revocation-validated or production-ready.
-- Improve failure diagnostics (stage/status codes, never payloads or keys).
-- Review service-stop responsiveness and aggregate delays with many TLS targets.
-- Resolve TLS1.3 support and the supported Windows baseline before release.
+- Commission an actual issuer revocation/publication/refresh process before
+  using the mandatory revocation policy on live monitoring infrastructure.
+  No production CA or server has been changed by this development work.
+- Complete native CNG key ACL-denial, same-process renewal, resource-leak,
+  aggregate-delay and full service-lifecycle acceptance tests.
+- Validate configuration/trust-file ownership, parent-directory protections and
+  administrator-only writes in deployment; the client does not yet enforce ACLs.
+  Unknown, empty or truncated TLS configuration now disables TLS rather than
+  silently changing trust or downgrading. Diagnostics identify destination,
+  failure stage and numeric Windows status; service environment dumps removed.
 - Review build provenance, license/distribution requirements and code signing.
 - Pilot separately after development review; no live installation is authorized
   by this feature branch alone.

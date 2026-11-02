@@ -96,18 +96,18 @@ mrwmi:
 	$(MAKE) -C X64 mrwmi.exe
 
 mrwmi.exe: $(OBJS) wmi.o disphelper.o
-	$(CC) -o mrwmi.exe $(OBJS) wmi.o disphelper.o -lws2_32 -lpsapi -lole32 -loleaut32 -luuid -lcrypt32 -lwevtapi -lpdh -lwtsapi32 -lsecur32
+	$(CC) -o mrwmi.exe $(OBJS) wmi.o disphelper.o -lws2_32 -lpsapi -lole32 -loleaut32 -luuid -lcrypt32 -lwevtapi -lpdh -lwtsapi32 -lsecur32 -lncrypt
 
 mrbig.exe: $(OBJS) clientlog.o $(VER_RES)
 	@echo "Building mrbig.exe"
-	$(CC) -o mrbig.exe $(OBJS) $(CLIENTLOGOBJS_32)  $(VER_RES) -lws2_32 -lpsapi -lole32 -loleaut32 -luuid -liphlpapi -lcrypt32 -lwevtapi -lpdh -lwtsapi32 -lnetapi32 -lsecur32
+	$(CC) -o mrbig.exe $(OBJS) $(CLIENTLOGOBJS_32)  $(VER_RES) -lws2_32 -lpsapi -lole32 -loleaut32 -luuid -liphlpapi -lcrypt32 -lwevtapi -lpdh -lwtsapi32 -lnetapi32 -lsecur32 -lncrypt
 
 mrbig64.exe: $(OBJS) clientlog.o $(VER_RES)
 	@echo "Building mrbig64.exe"
-	$(CC) -o mrbig64.exe $(OBJS) $(CLIENTLOGOBJS_64)  $(VER_RES) -lws2_32 -lpsapi -lole32 -loleaut32 -luuid -liphlpapi -lcrypt32 -lwevtapi -lpdh -lwtsapi32 -lnetapi32 -lsecur32
+	$(CC) -o mrbig64.exe $(OBJS) $(CLIENTLOGOBJS_64)  $(VER_RES) -lws2_32 -lpsapi -lole32 -loleaut32 -luuid -liphlpapi -lcrypt32 -lwevtapi -lpdh -lwtsapi32 -lnetapi32 -lsecur32 -lncrypt
 
 mrbignt.exe: $(NTOBJS)
-	$(CC) -o mrbignt.exe $(NTOBJS) -lws2_32 -lpsapi -lsecur32 -lcrypt32
+	$(CC) -o mrbignt.exe $(NTOBJS) -lws2_32 -lpsapi -lsecur32 -lcrypt32 -lncrypt
 
 clientlog.o:
 	$(MAKE) -C ../clientlog objectfile PACKAGE="$(PACKAGE)" VERSION="$(FILEVER_STR)"

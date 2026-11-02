@@ -14,6 +14,14 @@ void mrlog(char *format, ...)
     va_end(args);
 }
 
+static DWORD WINAPI cancel_later(LPVOID unused)
+{
+    (void)unused;
+    Sleep(250);
+    mr_tls_cancel();
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     struct mr_tls_config config;
@@ -21,11 +29,14 @@ int main(int argc, char **argv)
     WSADATA data;
     char message[65536];
     int result;
-    if (argc != 6 || strlen(argv[3]) >= sizeof(config.client_thumbprint) ||
-        strlen(argv[4]) >= sizeof(config.ca_file)) return 2;
+    HANDLE cancel_thread = NULL;
+    if (argc != 7 || strlen(argv[3]) >= sizeof(config.client_thumbprint) ||
+        strlen(argv[4]) >= sizeof(config.ca_file) ||
+        strlen(argv[6]) >= sizeof(config.crl_file)) return 2;
     memset(&config, 0, sizeof(config));
     strcpy(config.client_thumbprint, argv[3]);
     strcpy(config.ca_file, argv[4]);
+    strcpy(config.crl_file, argv[6]);
     config.timeout_ms = (DWORD)strtoul(argv[5], NULL, 10);
     memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
@@ -33,8 +44,14 @@ int main(int argc, char **argv)
     address.sin_port = htons((unsigned short)atoi(argv[1]));
     memset(message, 'x', sizeof(message));
     if (WSAStartup(MAKEWORD(2, 2), &data)) return 2;
+    if (getenv("MRBIG_TLS_CANCEL"))
+        cancel_thread = CreateThread(NULL, 0, cancel_later, NULL, 0, NULL);
     result = mr_tls_send(&address, argv[2], "127.0.0.1", &config,
                          message, sizeof(message));
     WSACleanup();
+    if (cancel_thread) {
+        WaitForSingleObject(cancel_thread, INFINITE);
+        CloseHandle(cancel_thread);
+    }
     return result ? 0 : 1;
 }
