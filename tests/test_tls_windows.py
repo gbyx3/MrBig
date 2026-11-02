@@ -5,6 +5,7 @@ Requires cryptography and MRBIG_TLS_PROBE pointing to the compiled test harness.
 No live infrastructure, administrator keys, or system-root trust changes.
 """
 import datetime
+import contextlib
 import json
 import os
 import shutil
@@ -406,7 +407,54 @@ class SchannelTests(unittest.TestCase):
         self.assertEqual(len(received), 65536)
         self.assertFalse(failures)
 
-    def exercise_service(self, stall=False, tls13=False):
+    def start_stunnel(self, backend_port, tls13):
+        """Disposable loopback receiver: same verification/relay shape as Xymon."""
+        with socket.socket() as reservation:
+            reservation.bind(('127.0.0.1', 0))
+            port = reservation.getsockname()[1]
+        directory = self.root / ('stunnel-' + os.urandom(6).hex())
+        directory.mkdir()
+        log = directory / 'receiver.log'
+        crl = x509.load_der_x509_crl((self.root / 'valid.crl').read_bytes())
+        crl_file = directory / 'issuer.crl'
+        crl_file.write_bytes(crl.public_bytes(serialization.Encoding.PEM))
+        config = directory / 'receiver.conf'
+        config.write_text('\n'.join([
+            'foreground = yes', 'debug = debug', 'output = ' + str(log),
+            'sslVersionMin = TLSv1.3' if tls13 else 'sslVersionMin = TLSv1.2',
+            'sslVersionMax = TLSv1.3' if tls13 else 'sslVersionMax = TLSv1.2',
+            '[from-clients]', 'accept = 127.0.0.1:' + str(port),
+            'connect = 127.0.0.1:' + str(backend_port),
+            'verifyChain = yes', 'checkHost = native-client',
+            'CAfile = ' + str(self.root / 'test-root.pem'),
+            'CRLfile = ' + str(crl_file),
+            'cert = ' + str(self.root / 'proxy.example.pem'),
+            'key = ' + str(self.root / 'proxy.example.key'), '']))
+        # Extracted console binary only: no installer/service or machine trust edits.
+        output = (directory / 'console.log').open('wb')
+        process = subprocess.Popen([os.environ['MRBIG_STUNNEL'], str(config)],
+                                   stdout=output, stderr=subprocess.STDOUT)
+        def cleanup():
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(5)
+            output.close()
+        self.addCleanup(cleanup)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if log.exists() and 'Accepting new connections' in log.read_text(errors='replace'):
+                return port, log
+            if process.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.fail('Disposable stunnel failed to start: ' +
+                  (log.read_text(errors='replace') if log.exists() else 'no receiver log'))
+
+    def exercise_service(self, stall=False, tls13=False, stunnel=False):
         """Install only a uniquely named disposable service on the hosted CI VM."""
         service = "MrBigTlsTest" + os.urandom(6).hex()
         directory = self.root / (service + " with spaces")
@@ -424,6 +472,9 @@ class SchannelTests(unittest.TestCase):
         listener.listen(16)
         listener.settimeout(0.2)
         port = listener.getsockname()[1]
+        relay_log = None
+        if stunnel:
+            port, relay_log = self.start_stunnel(port, tls13)
         finished = threading.Event()
         connected = threading.Event()
         report = threading.Event()
@@ -460,7 +511,9 @@ class SchannelTests(unittest.TestCase):
                                     except TimeoutError:
                                         continue
                                 continue
-                            with context.wrap_socket(connection, server_side=True) as stream:
+                            transport = (contextlib.nullcontext(connection) if stunnel else
+                                         context.wrap_socket(connection, server_side=True))
+                            with transport as stream:
                                 header = bytearray()
                                 while True:
                                     chunk = stream.recv(4096)
@@ -502,7 +555,9 @@ class SchannelTests(unittest.TestCase):
                 self.assertEqual(metadata["path"], image_path)
                 self.assertGreater(metadata["processId"], 0)
                 self.assertTrue((connected if stall else report).wait(10),
-                                "Service did not establish the expected reporting connection")
+                                "Service did not establish the expected reporting connection" +
+                                ('\n' + relay_log.read_text(errors='replace')[-12000:]
+                                 if relay_log else ''))
                 started = time.monotonic()
                 powershell("Stop-Service -Name '" + service + "';"
                     "$s=Get-Service -Name '" + service + "';"
@@ -528,6 +583,14 @@ class SchannelTests(unittest.TestCase):
 
     def test_service_tls13_start_stop_restart(self):
         self.exercise_service(tls13=True)
+
+    @unittest.skipUnless(os.environ.get('MRBIG_STUNNEL'), 'Needs disposable stunnel receiver')
+    def test_service_stunnel_tls12(self):
+        self.exercise_service(stunnel=True)
+
+    @unittest.skipUnless(os.environ.get('MRBIG_STUNNEL'), 'Needs disposable stunnel receiver')
+    def test_service_stunnel_tls13(self):
+        self.exercise_service(stunnel=True, tls13=True)
 
     def test_service_stop_during_stalled_tls(self):
         self.exercise_service(stall=True)

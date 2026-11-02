@@ -64,10 +64,20 @@ jobs:
           path: clients
       - name: Install test-only certificate tooling
         run: python -m pip install -r tests/requirements-windows.txt
+      - name: Extract pinned stunnel test receiver (no installation)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          curl.exe --fail --location --silent --show-error https://www.stunnel.org/downloads/stunnel-5.82-win64-installer.exe --output stunnel-installer.exe
+          if ($LASTEXITCODE -ne 0) { throw 'stunnel download failed' }
+          if ((Get-FileHash stunnel-installer.exe -Algorithm SHA256).Hash -ne '722c1ad626919af2b0034666b4d19cc4795e925c32f60e8f3c59af4fb3ad2dfc') { throw 'stunnel digest mismatch' }
+          7z.exe x stunnel-installer.exe -ostunnel-fixture -y
+          if ($LASTEXITCODE -ne 0) { throw 'stunnel extraction failed' }
       - name: Exercise Schannel using disposable local certificates
         shell: pwsh
         run: |
           $env:MRBIG_TLS_PROBE = (Resolve-Path "probes/tls_probe${{ matrix.bits }}.exe").Path
+          $env:MRBIG_STUNNEL = (Resolve-Path 'stunnel-fixture/bin/tstunnel.exe').Path
           if ('${{ matrix.bits }}' -eq '32') {
             $env:MRBIG_CLIENT = (Resolve-Path 'clients/X86/mrbig.exe').Path
           } else {
