@@ -283,14 +283,20 @@ class SchannelTests(unittest.TestCase):
             str(self.root / (root + ".pem")), "750" if stall and not cancel else "10000",
             str(self.root / (crl + ".crl")) if crl is not None else ""]
         if deny_key:
+            argument_file = self.root / "denied-key-arguments.json"
+            argument_file.write_text(json.dumps(arguments))
             command = ["pwsh.exe", "-NoProfile", "-NonInteractive", "-File",
                 str(Path(__file__).with_name("with_denied_key.ps1")),
-                "-KeyName", self.cng_keys[thumbprint], "-Probe", self.probe]
-            stdin = json.dumps(arguments) + "\n"
+                "-KeyName", self.cng_keys[thumbprint], "-Probe", self.probe,
+                "-ProbeArgumentsFile", str(argument_file)]
+            stdin = None
         else:
             command, stdin = [self.probe, *arguments], None
-        result = subprocess.run(command, input=stdin, timeout=60 if repeat > 1 else 15,
-                                env=environment, capture_output=True, text=True)
+        try:
+            result = subprocess.run(command, input=stdin, timeout=60 if repeat > 1 or deny_key else 15,
+                                    env=environment, capture_output=True, text=True)
+        except subprocess.TimeoutExpired as error:
+            self.fail("Disposable test driver timed out; diagnostic: " + str(error.stderr))
         self.last_probe_stdout = result.stdout
         self.last_probe_stderr = result.stderr
         elapsed = time.monotonic() - started

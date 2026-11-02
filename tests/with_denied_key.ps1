@@ -1,11 +1,13 @@
 # Disposable test key only. Keep a parent handle so its ACL can always be restored.
 param(
     [Parameter(Mandatory)][string]$KeyName,
-    [Parameter(Mandatory)][string]$Probe
+    [Parameter(Mandatory)][string]$Probe,
+    [Parameter(Mandatory)][string]$ProbeArgumentsFile
 )
 $ErrorActionPreference = 'Stop'
-$ProbeArguments = [string[]]([Console]::ReadLine() | ConvertFrom-Json)
+$ProbeArguments = [string[]](Get-Content -LiteralPath $ProbeArgumentsFile -Raw | ConvertFrom-Json)
 if (-not $KeyName.StartsWith('MrBig-test-')) { throw 'Refusing a non-test key' }
+[Console]::Error.WriteLine('Test ACL fixture: initializing native helper')
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -32,6 +34,7 @@ try {
     $original = [byte[]]::new($size)
     if ([TestCngAcl]::NCryptGetProperty($key.Handle, 'Security Descr', $original,
             $original.Length, [ref]$size, 4) -ne 0) { throw 'Cannot preserve disposable key ACL' }
+    [Console]::Error.WriteLine('Test ACL fixture: original ACL preserved')
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
         "D:P(D;;GR;;;$sid)(A;;GA;;;SY)(A;;GA;;;BA)")
@@ -40,11 +43,15 @@ try {
     if ([TestCngAcl]::NCryptSetProperty($key.Handle, 'Security Descr', $bytes,
             $bytes.Length, 4) -ne 0) { throw 'Cannot deny disposable key use' }
     $changed = $true
+    [Console]::Error.WriteLine('Test ACL fixture: denial applied; starting probe')
     & $Probe @ProbeArguments
     $result = $LASTEXITCODE
 } finally {
-    if ($changed -and [TestCngAcl]::NCryptSetProperty($key.Handle, 'Security Descr',
-            $original, $original.Length, 4) -ne 0) { throw 'Disposable key ACL restore failed' }
+    if ($changed) {
+        if ([TestCngAcl]::NCryptSetProperty($key.Handle, 'Security Descr',
+                $original, $original.Length, 4) -ne 0) { throw 'Disposable key ACL restore failed' }
+        [Console]::Error.WriteLine('Test ACL fixture: original ACL restored')
+    }
     $key.Dispose()
 }
 exit $result
