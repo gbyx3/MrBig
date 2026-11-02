@@ -65,15 +65,33 @@ class SchannelTests(unittest.TestCase):
         pfx = cls.root / "client.pfx"
         pfx.write_bytes(pkcs12.serialize_key_and_certificates(b"MrBig disposable test", key,
             client, None, serialization.NoEncryption()))
-        subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-            "Import-PfxCertificate -FilePath '" + str(pfx).replace("'", "''") +
-            "' -CertStoreLocation Cert:\\LocalMachine\\My | Out-Null"], check=True)
+        # Use the certificate-store API directly, not a profile-dependent Cert: drive.
+        # The PFX contains only this leaf and key, never the test CA.
+        cls.addClassCleanup(cls.temp.cleanup)
+        cls.addClassCleanup(cls.remove_identity)
+        subprocess.run(["pwsh.exe", "-NoProfile", "-NonInteractive", "-Command",
+            "$ErrorActionPreference='Stop';"
+            "$flags=[Security.Cryptography.X509Certificates.X509KeyStorageFlags]::MachineKeySet "
+            "-bor [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet;"
+            "$cert=[Security.Cryptography.X509Certificates.X509Certificate2]::new('" +
+            str(pfx).replace("'", "''") + "',[string]::Empty,$flags);"
+            "$store=[Security.Cryptography.X509Certificates.X509Store]::new('My','LocalMachine');"
+            "try {$store.Open('ReadWrite');$store.Add($cert)}"
+            "finally {$store.Dispose();$cert.Dispose()}"], check=True)
 
     @classmethod
-    def tearDownClass(cls):
-        subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-            "Remove-Item 'Cert:\\LocalMachine\\My\\" + cls.thumbprint + "' -DeleteKey"], check=True)
-        cls.temp.cleanup()
+    def remove_identity(cls):
+        subprocess.run(["pwsh.exe", "-NoProfile", "-NonInteractive", "-Command",
+            "$ErrorActionPreference='Stop';"
+            "$store=[Security.Cryptography.X509Certificates.X509Store]::new('My','LocalMachine');"
+            "try {$store.Open('ReadWrite');"
+            "$certs=$store.Certificates.Find('FindByThumbprint','" + cls.thumbprint + "',$false);"
+            "foreach($cert in $certs){"
+            "$rsa=[Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert);"
+            "try {if($rsa -is [Security.Cryptography.RSACng]){$rsa.Key.Delete()}"
+            "elseif($rsa -is [Security.Cryptography.RSACryptoServiceProvider]){$rsa.PersistKeyInCsp=$false}"
+            "$store.Remove($cert)}finally{if($rsa){$rsa.Dispose()};$cert.Dispose()}}}"
+            "finally{$store.Dispose()}"], check=True)
 
     def exchange(self, certificate="proxy.example", name="proxy.example",
                  root="test-root", thumbprint=None, stall=False):
